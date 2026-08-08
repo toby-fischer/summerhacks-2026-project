@@ -1,6 +1,7 @@
 import type { NextRequest } from 'next/server';
 
-const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
+const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const DEFAULT_OPENROUTER_MODEL = 'google/gemma-4-26b-a4b-it:free';
 
 function findJson(text: string): string {
   const jsonStart = text.indexOf('{');
@@ -67,9 +68,10 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
+  const model = process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL;
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: 'OPENAI_API_KEY is not configured on the server.' }), {
+    return new Response(JSON.stringify({ error: 'OPENROUTER_API_KEY is not configured on the server.' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -84,14 +86,16 @@ Use realistic dimensions for a single plant geometry that will be instanced mult
   const userMessage = `Generate a single plant model for the cue: "${prompt}".
 Use natural plant proportions and include enough components to produce a recognizably leafy or floral shape.`;
 
-  const response = await fetch(OPENAI_API_URL, {
+  const response = await fetch(OPENROUTER_API_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
+      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000',
+      'X-Title': 'SummerHacks 2026',
     },
     body: JSON.stringify({
-      model: 'gpt-4o-mini',
+      model,
       messages: [
         { role: 'system', content: systemMessage },
         { role: 'user', content: userMessage },
@@ -106,14 +110,14 @@ Use natural plant proportions and include enough components to produce a recogni
     result = await response.json();
   } catch (error) {
     const text = await response.text();
-    return new Response(JSON.stringify({ model: createFallbackPlantModel(prompt), warning: 'OpenAI returned a non-JSON response.', details: text || String(error) }), {
+    return new Response(JSON.stringify({ model: createFallbackPlantModel(prompt), warning: 'OpenRouter returned a non-JSON response.', details: text || String(error) }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
   if (!response.ok) {
-    return new Response(JSON.stringify({ model: createFallbackPlantModel(prompt), warning: 'OpenAI request failed, using fallback', details: result }), {
+    return new Response(JSON.stringify({ model: createFallbackPlantModel(prompt), warning: 'OpenRouter request failed, using fallback', details: result }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -126,7 +130,7 @@ Use natural plant proportions and include enough components to produce a recogni
       : '';
 
   if (!output) {
-    return new Response(JSON.stringify({ error: 'OpenAI returned no usable output.' }), {
+    return new Response(JSON.stringify({ error: 'OpenRouter returned no usable output.' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     });

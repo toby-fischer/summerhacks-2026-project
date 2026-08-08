@@ -750,14 +750,37 @@ function Walker({
   selfId: string;
   onOpenVegetation: (x: number, z: number) => void;
 }) {
-  const { camera } = useThree();
+  const { camera, gl } = useThree();
   const move = useRef({ f: false, b: false, l: false, r: false, sprint: false });
   const dir = useRef(new THREE.Vector3());
   const euler = useRef(new THREE.Euler(0, 0, 0, 'YXZ'));
   const lastSend = useRef(0);
   const locked = useRef(false);
+  const lockCooldownUntil = useRef(0);
 
   useEffect(() => {
+    const domElement = gl.domElement as HTMLCanvasElement;
+    const originalRequestPointerLock = domElement.requestPointerLock?.bind(domElement);
+    const originalExitPointerLock = document.exitPointerLock?.bind(document);
+
+    domElement.requestPointerLock = (() => {
+      if (typeof originalRequestPointerLock !== 'function') return undefined;
+      try {
+        return originalRequestPointerLock();
+      } catch {
+        return undefined;
+      }
+    }) as typeof domElement.requestPointerLock;
+
+    document.exitPointerLock = (() => {
+      if (typeof originalExitPointerLock !== 'function') return;
+      try {
+        originalExitPointerLock();
+      } catch {
+        // Ignore unsupported or rejected pointer-lock exits.
+      }
+    }) as typeof document.exitPointerLock;
+
     const set = (code: string, v: boolean) => {
       if (code === 'KeyW' || code === 'ArrowUp') move.current.f = v;
       if (code === 'KeyS' || code === 'ArrowDown') move.current.b = v;
@@ -774,16 +797,49 @@ function Walker({
     };
     const up = (e: KeyboardEvent) => set(e.code, false);
     const blur = () => (move.current = { f: false, b: false, l: false, r: false, sprint: false });
+    const handlePointerLockChange = () => {
+      const wasLocked = document.pointerLockElement === gl.domElement;
+      locked.current = wasLocked;
+      if (!wasLocked) {
+        lockCooldownUntil.current = performance.now() + 250;
+      }
+    };
+    const handleCanvasPointerDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      if (document.pointerLockElement === gl.domElement) return;
+      if (performance.now() < lockCooldownUntil.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        gl.domElement.requestPointerLock();
+      } catch {
+        // Ignore browser-side pointer lock rejections during rapid unlock/relock cycles.
+      }
+    };
 
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
     window.addEventListener('blur', blur);
+    document.addEventListener('pointerlockchange', handlePointerLockChange);
+    gl.domElement.addEventListener('mousedown', handleCanvasPointerDown, true);
     return () => {
+      if (originalRequestPointerLock) {
+        domElement.requestPointerLock = originalRequestPointerLock;
+      }
+      if (originalExitPointerLock) {
+        document.exitPointerLock = originalExitPointerLock;
+      }
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
+      document.removeEventListener('pointerlockchange', handlePointerLockChange);
+      gl.domElement.removeEventListener('mousedown', handleCanvasPointerDown, true);
     };
-  }, [camera, onOpenVegetation]);
+  }, [camera, gl, onOpenVegetation]);
 
   useFrame((_, delta) => {
     const m = move.current;
@@ -817,12 +873,7 @@ function Walker({
     }
   });
 
-  return (
-    <PointerLockControls
-      onLock={() => (locked.current = true)}
-      onUnlock={() => (locked.current = false)}
-    />
-  );
+  return <PointerLockControls onLock={() => (locked.current = true)} onUnlock={() => (locked.current = false)} />;
 }
 
 /* ----------------------------------------------------------------- page --- */
@@ -858,7 +909,11 @@ export default function World() {
 
   const openVegetation = useCallback((x: number, z: number) => {
     if (document.pointerLockElement) {
-      document.exitPointerLock();
+      window.setTimeout(() => {
+        if (document.pointerLockElement) {
+          document.exitPointerLock();
+        }
+      }, 0);
     }
     setVegetationAt({ x, z });
   }, []);
