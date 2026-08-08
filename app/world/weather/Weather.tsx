@@ -29,6 +29,7 @@ import * as React from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 
 import type { Contribution, WeatherPayload } from '../contract';
+import type { Atmosphere } from './conditions';
 import { AtmosphereRig } from './Atmosphere';
 import { Precipitation } from './Precipitation';
 import {
@@ -49,9 +50,17 @@ export interface WeatherProps {
   quality?: number;
   /** Pins time of day, 0..1, for the debug scrubber. Null follows the clock. */
   timeOverride?: number | null;
+  /**
+   * Optional handle on the live eased atmosphere, for the debug panel.
+   *
+   * Exposing the ref rather than copying values out: the panel must read
+   * exactly what the renderer draws from, or it can agree with itself while
+   * the world is visibly wrong.
+   */
+  expose?: React.RefObject<Atmosphere | null>;
 }
 
-export function Weather({ zones, quality = 1, timeOverride = null }: WeatherProps) {
+export function Weather({ zones, quality = 1, timeOverride = null, expose }: WeatherProps) {
   const { camera } = useThree();
 
   // Three long-lived Atmosphere objects, allocated once at mount:
@@ -71,6 +80,10 @@ export function Weather({ zones, quality = 1, timeOverride = null }: WeatherProp
   // without the loop itself being a dependency of anything.
   const zoneRef = React.useRef<readonly WeatherContribution[]>(zones);
   zoneRef.current = zones;
+
+  // Hand the live atmosphere to whoever asked for it. Assigning during render
+  // rather than in an effect so the debug panel's first poll already has it.
+  if (expose) expose.current = live.current;
 
   useFrame((_, delta) => {
     const now = performance.now();

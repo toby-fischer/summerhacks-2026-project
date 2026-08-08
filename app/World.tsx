@@ -26,8 +26,10 @@ import {
   SKETCH_GRID,
   type BuiltPatch,
 } from './world/terrain';
-import { Weather, CONDITIONS } from './world/weather';
+import { Weather, CONDITIONS, type Atmosphere } from './world/weather';
 import { Minimap, type MinimapSelf } from './world/Minimap';
+import { DebugPanel } from './world/DebugPanel';
+import { useDebugBridge } from './world/useDebugBridge';
 import { CreatureMesh, CreatureDrawPanel, type Creature } from './world/creature';
 import type { Contribution, WeatherPayload } from './world/contract';
 import {
@@ -201,6 +203,7 @@ function Walker({
   onOpenWeather,
   onOpenCreature,
   onFlyChange,
+  teleportRef,
 }: {
   built: BuiltPatch[];
   channel: React.RefObject<RealtimeChannel | null>;
@@ -211,8 +214,27 @@ function Walker({
   onOpenWeather: (x: number, z: number) => void;
   onOpenCreature: (x: number, z: number) => void;
   onFlyChange: (flying: boolean) => void;
+  /** Filled with a camera-jump function, so the debug tools can move you. */
+  teleportRef: React.RefObject<((x: number, z: number) => void) | null>;
 }) {
   const { camera } = useThree();
+
+  // Only the camera can move itself, and it lives inside the Canvas. Publish a
+  // setter so the debug panel and the /api/debug bridge — both outside — can
+  // put you somewhere without either of them reaching into three directly.
+  useEffect(() => {
+    teleportRef.current = (x: number, z: number) => {
+      camera.position.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, x));
+      camera.position.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, z));
+      // Drop in from above rather than at ground level: the height lerp then
+      // settles you onto whatever terrain is there, instead of spawning you
+      // inside a mountain that happens to occupy the destination.
+      camera.position.y = WORLD_CEIL * 0.25;
+    };
+    return () => {
+      teleportRef.current = null;
+    };
+  }, [camera, teleportRef]);
   const move = useRef({
     f: false,
     b: false,
@@ -464,6 +486,15 @@ export default function World() {
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
   );
+
+  /* -------- debugging -------- */
+
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [timeOverride, setTimeOverride] = useState<number | null>(null);
+  /** The live atmosphere, handed up by <Weather> so the panel reads the real one. */
+  const atmosphereRef = useRef<Atmosphere | null>(null);
+  /** Set by Walker so anything outside the Canvas can move the camera. */
+  const teleportRef = useRef<((x: number, z: number) => void) | null>(null);
 
   const selfId = useMemo(makeSelfId, []);
 
@@ -821,6 +852,25 @@ export default function World() {
     [selfId],
   );
 
+  /* -------- debug wiring -------- */
+
+  // Backtick toggles the panel. Chosen because it is not bound to anything in
+  // the world, so it can't be pressed by accident while playing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Backquote') {
+        e.preventDefault();
+        setDebugOpen((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const teleport = useCallback((x: number, z: number) => {
+    teleportRef.current?.(x, z);
+  }, []);
+
   /* -------- reset -------- */
 
   /**
@@ -845,6 +895,37 @@ export default function World() {
     setCreatures([]);
     cache.current.clear();
   }, []);
+
+  // Report live state to /api/debug and run anything queued from outside.
+  // Dev-only on both ends: the hook no-ops in production and the route refuses
+  // there too, so there is no path by which this ships.
+  useDebugBridge(
+    {
+      atmosphere: atmosphereRef as React.RefObject<Atmosphere>,
+      self: mapSelf,
+      zones,
+      counts: {
+        patches: patches.length,
+        creatures: creatures.length,
+        travellers: travellers.length,
+      },
+      timeOverride,
+    },
+    {
+      onTeleport: teleport,
+      onTime: setTimeOverride,
+      onWeather: (condition, intensity, radius) => {
+        const p = mapSelf.current;
+        summonWeather(condition, p.x, p.z, intensity, radius);
+      },
+      onClearView: () => {
+        setPatches([]);
+        setZones([]);
+        setCreatures([]);
+        cache.current.clear();
+      },
+    },
+  );
 
   // Flatten the weather rows to what the map needs. Memoized so the map's
   // props are referentially stable while only travellers are moving.
@@ -877,7 +958,12 @@ export default function World() {
         {/* Sky, stars, sun, fog and precipitation — all of it. Mounted once,
             as a sibling of the terrain rather than per-contribution, because
             there is only ever one atmosphere. Owns scene.fog from here on. */}
-        <Weather zones={zones} quality={quality} />
+        <Weather
+          zones={zones}
+          quality={quality}
+          timeOverride={timeOverride}
+          expose={atmosphereRef}
+        />
 
         <Plain />
         {built.map((b) => (
@@ -901,6 +987,7 @@ export default function World() {
           onOpenWeather={(x, z) => setWeatherAt({ x, z })}
           onOpenCreature={(x, z) => setCreatureAt({ x, z })}
           onFlyChange={setFlying}
+          teleportRef={teleportRef}
         />
       </Canvas>
 
@@ -957,6 +1044,23 @@ export default function World() {
           </p>
         )}
       </div>
+
+      {debugOpen && (
+        <DebugPanel
+          atmosphere={atmosphereRef as React.RefObject<Atmosphere>}
+          self={mapSelf}
+          zones={zones}
+          counts={{
+            patches: patches.length,
+            creatures: creatures.length,
+            travellers: travellers.length,
+          }}
+          timeOverride={timeOverride}
+          onTimeOverride={setTimeOverride}
+          onTeleport={teleport}
+          onClose={() => setDebugOpen(false)}
+        />
+      )}
 
       {drawAt && (
         <DrawPanel
