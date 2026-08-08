@@ -5,9 +5,8 @@
 //
 //   conditions.ts      named presets + the text-agent schema (no React/Three)
 //   blend.ts           sampling, easing, day/night maths (no React/Three)
-//   Atmosphere.tsx     sky, stars, lights, fog — composes the four below
+//   Atmosphere.tsx     sky, stars, lights, fog — composes the three below
 //   Celestial.tsx      the sun and moon discs
-//   Clouds.tsx         instanced blocky cloud layer
 //   Lightning.tsx      storm flashes
 //   Precipitation.tsx  camera-relative rain and snow
 //   Weather.tsx        the one component World.tsx mounts
@@ -44,5 +43,4 @@ export {
 export { AtmosphereRig, type AtmosphereProps } from './Atmosphere';
 export { Precipitation, type PrecipitationProps } from './Precipitation';
 export { Celestial, type CelestialProps } from './Celestial';
-export { BlockClouds, CLOUD_SPAN, type BlockCloudsProps } from './Clouds';
 export { Lightning, type LightningProps } from './Lightning';

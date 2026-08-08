@@ -33,7 +33,6 @@ import * as THREE from 'three';
 import type { Atmosphere as AtmosphereState } from './conditions';
 import { daylight, sunElevation, timeOfDay } from './blend';
 import { Celestial } from './Celestial';
-import { BlockClouds } from './Clouds';
 import { Lightning } from './Lightning';
 
 /** Where the sun sits on its arc. Radius is arbitrary — only direction matters. */
@@ -222,7 +221,6 @@ export function AtmosphereRig({ state, timeOverride = null }: AtmosphereProps) {
       />
 
       <Celestial state={state} timeOverride={timeOverride} />
-      <BlockClouds state={state} />
       <Lightning state={state} />
 
       <ambientLight ref={ambientRef} intensity={0.6} />

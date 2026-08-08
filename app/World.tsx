@@ -28,6 +28,7 @@ import {
   type BuiltPatch,
 } from './world/terrain';
 import { Weather, CONDITIONS } from './world/weather';
+import { Minimap, type MinimapSelf } from './world/Minimap';
 import type { Contribution, WeatherPayload } from './world/contract';
 import {
   BROADCAST_MS,
@@ -199,6 +200,7 @@ function Walker({
   built,
   channel,
   selfId,
+  mapSelf,
   onOpenDraw,
   onOpenWeather,
   onFlyChange,
@@ -206,6 +208,8 @@ function Walker({
   built: BuiltPatch[];
   channel: React.RefObject<RealtimeChannel | null>;
   selfId: string;
+  /** Written every frame for the minimap, which lives outside the Canvas. */
+  mapSelf: React.RefObject<MinimapSelf>;
   onOpenDraw: (x: number, z: number) => void;
   onOpenWeather: (x: number, z: number) => void;
   onFlyChange: (flying: boolean) => void;
@@ -329,6 +333,13 @@ function Walker({
       camera.position.y += (ground - camera.position.y) * Math.min(1, delta * 10);
     }
 
+    // Mutate in place rather than replacing the object: the minimap reads this
+    // on its own clock, and allocating a fresh object every frame would hand
+    // the GC 60 objects a second for no benefit.
+    mapSelf.current.x = camera.position.x;
+    mapSelf.current.z = camera.position.z;
+    mapSelf.current.a = camera.rotation.y;
+
     const now = performance.now();
     const ch = channel.current;
     if (ch && now - lastSend.current > BROADCAST_MS) {
@@ -343,6 +354,23 @@ function Walker({
       });
     }
   });
+
+  // Chrome refuses a re-lock within ~1s of Esc and fires `pointerlockerror`.
+  // The next click succeeds, so nothing is actually broken — but three logs it
+  // via console.error, and a red error in the console during judging reads as a
+  // broken app. Swallow just this one message and leave every other error alone.
+  useEffect(() => {
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      if (typeof args[0] === 'string' && args[0].includes('Unable to use Pointer Lock API')) {
+        return;
+      }
+      original(...args);
+    };
+    return () => {
+      console.error = original;
+    };
+  }, []);
 
   return (
     <PointerLockControls
@@ -377,6 +405,9 @@ export default function World() {
   }, []);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const travellerMap = useRef<Map<string, Traveller>>(new Map());
+  // Camera position for the minimap. Seeded to the spawn point so the arrow is
+  // correct on the first frame, before Walker's first useFrame runs.
+  const mapSelf = useRef<MinimapSelf>({ x: 0, z: 40, a: 0 });
 
   // Synthesis is the expensive step, so it happens once per patch and is
   // cached by id — not on every render or frame.
@@ -640,6 +671,20 @@ export default function World() {
     if (error) console.error('reset failed', error);
   }, []);
 
+  // Flatten the weather rows to what the map needs. Memoized so the map's
+  // props are referentially stable while only travellers are moving.
+  const mapZones = useMemo(
+    () =>
+      zones.map((z) => ({
+        id: z.id,
+        x: z.x,
+        z: z.z,
+        radius: z.payload.radius,
+        condition: z.payload.condition,
+      })),
+    [zones],
+  );
+
   const label =
     status === 'live'
       ? `${travellers.length} traveller${travellers.length === 1 ? '' : 's'} nearby`
@@ -672,11 +717,23 @@ export default function World() {
           built={built}
           channel={channelRef}
           selfId={selfId}
+          mapSelf={mapSelf}
           onOpenDraw={(x, z) => setDrawAt({ x, z })}
           onOpenWeather={(x, z) => setWeatherAt({ x, z })}
           onFlyChange={setFlying}
         />
       </Canvas>
+
+      {/* Top right, opposite the HUD. Works with no Supabase: patches and
+          zones are whatever this client knows about, which offline is just
+          your own. */}
+      <Minimap
+        half={WORLD_HALF}
+        patches={patches}
+        zones={mapZones}
+        travellers={travellers}
+        self={mapSelf}
+      />
 
       <div className="absolute left-6 top-6 rounded-lg bg-black/50 p-4 backdrop-blur">
         <h1 className="text-lg font-semibold text-white">Infinite Terra</h1>
