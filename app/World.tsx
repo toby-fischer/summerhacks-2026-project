@@ -40,12 +40,40 @@ const PATCH_SCALE = 300;
 const PATCH_MAX_H = 60;
 const EYE = 1.8;
 
+// Preset color options for the marker
+const COLOR_PALETTE = [
+  { name: 'Black', value: '#000000' },
+  { name: 'Charcoal', value: '#4b5563' },
+  { name: 'Red', value: '#ef4444' },
+  { name: 'Orange', value: '#f97316' },
+  { name: 'Yellow', value: '#eab308' },
+  { name: 'Green', value: '#22c55e' },
+  { name: 'Blue', value: '#3b82f6' },
+  { name: 'Purple', value: '#a855f7' },
+  { name: 'Pink', value: '#ec4899' },
+  { name: 'White / Eraser', value: '#ffffff' },
+];
+
+const MARKER_SIZES = [
+  { label: 'S', size: 6 },
+  { label: 'M', size: 16 },
+  { label: 'L', size: 28 },
+];
+
 interface Patch {
   id: string;
   x: number;
   z: number;
   sketch: string;
   seed: number;
+}
+
+interface AnimalData {
+  id: string;
+  x: number;
+  z: number;
+  outlineSketch: string;
+  patternSketch: string;
 }
 
 /* ------------------------------------------------------------ encoding --- */
@@ -153,6 +181,227 @@ function groundAt(
   return h;
 }
 
+/* ---------------------------------------------------------------- animal --- */
+
+function AnimalMesh({
+  animal,
+  groundY,
+}: {
+  animal: AnimalData;
+  groundY: number;
+}) {
+  const { geometry, texture, height } = useMemo(() => {
+    const outlineGrid = decodeSketch(animal.outlineSketch);
+    const patternGrid = decodeSketch(animal.patternSketch);
+
+    // 1. Generate 3D Shape by extruding the outline grid
+    const shape = new THREE.Shape();
+    let started = false;
+
+    // Extract contour points from grid
+    const threshold = 0.15;
+    const solidGrid = new Uint8Array(SKETCH_GRID * SKETCH_GRID);
+    for (let i = 0; i < outlineGrid.length; i++) {
+      if (outlineGrid[i] > threshold) solidGrid[i] = 1;
+    }
+
+    const outside = new Uint8Array(SKETCH_GRID * SKETCH_GRID);
+    const queue: number[] = [];
+
+    const pushIfOutside = (x: number, y: number) => {
+      if (x < 0 || x >= SKETCH_GRID || y < 0 || y >= SKETCH_GRID) return;
+      const idx = y * SKETCH_GRID + x;
+      if (!outside[idx] && !solidGrid[idx]) {
+        outside[idx] = 1;
+        queue.push(idx);
+      }
+    };
+
+    // Flood fill background starting from outer perimeter
+    for (let x = 0; x < SKETCH_GRID; x++) {
+      pushIfOutside(x, 0);
+      pushIfOutside(x, SKETCH_GRID - 1);
+    }
+    for (let y = 0; y < SKETCH_GRID; y++) {
+      pushIfOutside(0, y);
+      pushIfOutside(SKETCH_GRID - 1, y);
+    }
+
+    let head = 0;
+    while (head < queue.length) {
+      const idx = queue[head++];
+      const x = idx % SKETCH_GRID;
+      const y = Math.floor(idx / SKETCH_GRID);
+      pushIfOutside(x + 1, y);
+      pushIfOutside(x - 1, y);
+      pushIfOutside(x, y + 1);
+      pushIfOutside(x, y - 1);
+    }
+
+    const isSolid = (x: number, y: number) => {
+      if (x < 0 || x >= SKETCH_GRID || y < 0 || y >= SKETCH_GRID) return false;
+      return !outside[y * SKETCH_GRID + x];
+    };
+
+    // 2. Construct solid 3D figure geometry
+    const scale = 2.5;
+    const depth = 0.6;
+    const dx = scale / SKETCH_GRID;
+    const dy = scale / SKETCH_GRID;
+
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+    let vertCount = 0;
+
+    const addQuad = (
+      p0: [number, number, number],
+      p1: [number, number, number],
+      p2: [number, number, number],
+      p3: [number, number, number],
+      norm: [number, number, number],
+      uv0: [number, number],
+      uv1: [number, number],
+      uv2: [number, number],
+      uv3: [number, number],
+    ) => {
+      positions.push(...p0, ...p1, ...p2, ...p3);
+      normals.push(...norm, ...norm, ...norm, ...norm);
+      uvs.push(...uv0, ...uv1, ...uv2, ...uv3);
+
+      indices.push(
+        vertCount, vertCount + 1, vertCount + 2,
+        vertCount, vertCount + 2, vertCount + 3,
+      );
+      vertCount += 4;
+    };
+
+    for (let y = 0; y < SKETCH_GRID; y++) {
+      for (let x = 0; x < SKETCH_GRID; x++) {
+        if (!isSolid(x, y)) continue;
+
+        const x0 = (x / SKETCH_GRID - 0.5) * scale;
+        const x1 = x0 + dx;
+        const y1 = ((SKETCH_GRID - y) / SKETCH_GRID - 0.5) * scale;
+        const y0 = y1 - dy;
+        const z0 = -depth / 2;
+        const z1 = depth / 2;
+
+        const uMin = x / SKETCH_GRID;
+        const uMax = (x + 1) / SKETCH_GRID;
+        const vMin = 1 - (y + 1) / SKETCH_GRID;
+        const vMax = 1 - y / SKETCH_GRID;
+
+        // Front face (+Z)
+        addQuad(
+          [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+          [0, 0, 1],
+          [uMin, vMin], [uMax, vMin], [uMax, vMax], [uMin, vMax],
+        );
+
+        // Back face (-Z)
+        addQuad(
+          [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0],
+          [0, 0, -1],
+          [uMax, vMin], [uMin, vMin], [uMin, vMax], [uMax, vMax],
+        );
+
+        // Left face (-X)
+        if (!isSolid(x - 1, y)) {
+          addQuad(
+            [x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0],
+            [-1, 0, 0],
+            [0, vMin], [1, vMin], [1, vMax], [0, vMax],
+          );
+        }
+
+        // Right face (+X)
+        if (!isSolid(x + 1, y)) {
+          addQuad(
+            [x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1],
+            [1, 0, 0],
+            [0, vMin], [1, vMin], [1, vMax], [0, vMax],
+          );
+        }
+
+        // Top face (+Y)
+        if (!isSolid(x, y - 1)) {
+          addQuad(
+            [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0],
+            [0, 1, 0],
+            [uMin, 0], [uMax, 0], [uMax, 1], [uMin, 1],
+          );
+        }
+
+        // Bottom face (-Y)
+        if (!isSolid(x, y + 1)) {
+          addQuad(
+            [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1],
+            [0, -1, 0],
+            [uMin, 0], [uMax, 0], [uMax, 1], [uMin, 1],
+          );
+        }
+      }
+    }
+
+    let geom: THREE.BufferGeometry;
+    let meshHeight = 1.2;
+
+    if (positions.length === 0) {
+      geom = new THREE.BoxGeometry(1, 1, 1);
+    } else {
+      geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geom.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+      geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+      geom.setIndex(indices);
+      geom.computeBoundingBox();
+      if (geom.boundingBox) {
+        meshHeight = geom.boundingBox.max.y - geom.boundingBox.min.y;
+      }
+    geom.center();
+    }
+
+    // 2. Build canvas texture from pattern grid
+    const canvas = document.createElement('canvas');
+    canvas.width = SKETCH_GRID;
+    canvas.height = SKETCH_GRID;
+    const ctx = canvas.getContext('2d')!;
+
+    const imgData = ctx.createImageData(SKETCH_GRID, SKETCH_GRID);
+    for (let i = 0; i < patternGrid.length; i++) {
+      const val = patternGrid[i];
+      const idx = i * 4;
+      imgData.data[idx] = Math.round((1 - val) * 240); // Base skin color light
+      imgData.data[idx + 1] = Math.round((1 - val) * 220);
+      imgData.data[idx + 2] = Math.round((1 - val) * 200);
+      imgData.data[idx + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(4, 4);
+    tex.magFilter = THREE.NearestFilter;
+    tex.needsUpdate = true;
+
+    return { geometry: geom, texture: tex, height: meshHeight };
+  }, [animal]);
+
+  return (
+    <mesh
+      geometry={geometry}
+      position={[animal.x, groundY + height / 2, animal.z]}
+      castShadow
+      receiveShadow
+    >
+      <meshStandardMaterial map={texture} roughness={0.8} />
+    </mesh>
+  );
+}
+
 /* ------------------------------------------------------------ the plain --- */
 
 function Plain() {
@@ -211,13 +460,15 @@ function Walker({
   channel,
   selfId,
   onOpenDraw,
-  isDrawing,
+  onOpenAnimalDraw,
+  isModalOpen,
 }: {
   built: { patch: Patch; terrain: TerrainData }[];
   channel: React.RefObject<RealtimeChannel | null>;
   selfId: string;
   onOpenDraw: (x: number, z: number) => void;
-  isDrawing: boolean;
+  onOpenAnimalDraw: (x: number, z: number) => void;
+  isModalOpen: boolean;
 }) {
   const { camera } = useThree();
   const move = useRef({ f: false, b: false, l: false, r: false, sprint: false });
@@ -227,10 +478,10 @@ function Walker({
 
   // Force exit pointer lock whenever the draw modal opens
   useEffect(() => {
-    if (isDrawing) {
+    if (isModalOpen) {
       document.exitPointerLock();
     }
-  }, [isDrawing]);
+  }, [isModalOpen]);
 
   useEffect(() => {
     const set = (code: string, v: boolean) => {
@@ -241,13 +492,19 @@ function Walker({
       if (code === 'ShiftLeft' || code === 'ShiftRight') move.current.sprint = v;
     };
     const down = (e: KeyboardEvent) => {
-      if (isDrawing) return;
+      if (isModalOpen) return;
 
       set(e.code, true);
-      if (e.code === 'KeyE' && locked.current) {
+      if (locked.current) {
+        if (e.code === 'KeyE') {
         e.preventDefault();
         document.exitPointerLock();
         onOpenDraw(camera.position.x, camera.position.z);
+        } else if (e.code === 'KeyR') {
+          e.preventDefault();
+          document.exitPointerLock();
+          onOpenAnimalDraw(camera.position.x, camera.position.z);
+        }
       }
     };
     const up = (e: KeyboardEvent) => set(e.code, false);
@@ -261,10 +518,10 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw, isDrawing]);
+  }, [camera, onOpenDraw, onOpenAnimalDraw, isModalOpen]);
 
   useFrame((_, delta) => {
-    if (isDrawing) return;
+    if (isModalOpen) return;
 
     const m = move.current;
     const speed = (m.sprint ? 40 : 16) * delta;
@@ -300,7 +557,7 @@ function Walker({
   });
 
   // Completely unmount PointerLockControls while drawing so pointer clicks do not re-trigger lock
-  if (isDrawing) return null;
+  if (isModalOpen) return null;
 
   return (
     <PointerLockControls
@@ -314,8 +571,10 @@ function Walker({
 
 export default function World() {
   const [patches, setPatches] = useState<Patch[]>([]);
+  const [animals, setAnimals] = useState<AnimalData[]>([]);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
+  const [animalDrawAt, setAnimalDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
   );
@@ -357,20 +616,39 @@ export default function World() {
       };
     };
 
+    const toAnimal = (r: Record<string, unknown>): AnimalData | null => {
+      const props = (r.properties ?? {}) as Record<string, unknown>;
+      if (typeof props.outlineSketch !== 'string' || typeof props.patternSketch !== 'string') return null;
+      return {
+        id: String(r.id),
+        x: Number(r.x) || 0,
+        z: Number(r.z) || 0,
+        outlineSketch: props.outlineSketch,
+        patternSketch: props.patternSketch,
+      };
+    };
+
     supabase
       .from('world_assets')
       .select('*')
-      .eq('type', 'terrain')
       .then(({ data, error }) => {
         if (cancelled || error || !data) return;
-        setPatches((prev) => {
-          const byId = new Map(prev.map((p) => [p.id, p]));
+        
+        const nextPatches: Patch[] = [];
+        const nextAnimals: AnimalData[] = [];
+
           for (const row of data) {
+          if (row.type === 'terrain') {
             const p = toPatch(row as Record<string, unknown>);
-            if (p) byId.set(p.id, p);
+            if (p) nextPatches.push(p);
+          } else if (row.type === 'animal') {
+            const a = toAnimal(row as Record<string, unknown>);
+            if (a) nextAnimals.push(a);
           }
-          return [...byId.values()];
-        });
+        }
+
+        setPatches(nextPatches);
+        setAnimals(nextAnimals);
       });
 
     const channel = supabase
@@ -379,9 +657,14 @@ export default function World() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'world_assets' },
         (payload) => {
-          const p = toPatch(payload.new as Record<string, unknown>);
-          if (!p) return;
-          setPatches((prev) => (prev.some((q) => q.id === p.id) ? prev : [...prev, p]));
+          const row = payload.new as Record<string, unknown>;
+          if (row.type === 'terrain') {
+            const p = toPatch(row);
+            if (p) setPatches((prev) => (prev.some((q) => q.id === p.id) ? prev : [...prev, p]));
+          } else if (row.type === 'animal') {
+            const a = toAnimal(row);
+            if (a) setAnimals((prev) => (prev.some((q) => q.id === a.id) ? prev : [...prev, a]));
+          }
         },
       )
       .subscribe((s) => {
@@ -420,7 +703,7 @@ export default function World() {
     };
   }, [selfId]);
 
-  /* -------- contribute -------- */
+  /* -------- contribute terrain -------- */
   const commit = useCallback(
     (grid: Float32Array<ArrayBuffer>, x: number, z: number) => {
       const sketch = encodeSketch(grid);
@@ -455,12 +738,45 @@ export default function World() {
     [],
   );
 
+  /* -------- contribute animal -------- */
+  const commitAnimal = useCallback(
+    (outlineGrid: Float32Array<ArrayBuffer>, patternGrid: Float32Array<ArrayBuffer>, x: number, z: number) => {
+      const outlineSketch = encodeSketch(outlineGrid);
+      const patternSketch = encodeSketch(patternGrid);
+      const tempId = `temp-animal-${Math.random() * 1e9}`;
+
+      setAnimals((prev) => [...prev, { id: tempId, x, z, outlineSketch, patternSketch }]);
+      setAnimalDrawAt(null);
+
+      if (!supabase) return;
+
+      supabase
+        .from('world_assets')
+        .insert({ x, z, type: 'animal', properties: { outlineSketch, patternSketch } })
+        .select()
+        .then(({ data, error }) => {
+          setAnimals((prev) => {
+            const without = prev.filter((a) => a.id !== tempId);
+            if (error || !data?.length) return without;
+            const row = data[0] as Record<string, unknown>;
+            const id = String(row.id);
+            return without.some((a) => a.id === id)
+              ? without
+              : [...without, { id, x, z, outlineSketch, patternSketch }];
+          });
+        });
+    },
+    [],
+  );
+
   const label =
     status === 'live'
       ? `${travellers.length} traveller${travellers.length === 1 ? '' : 's'} nearby`
       : status === 'connecting'
         ? 'connecting…'
         : 'offline — solo world';
+
+  const isModalOpen = drawAt !== null || animalDrawAt !== null;
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
@@ -482,6 +798,10 @@ export default function World() {
           <PatchMesh key={patch.id} patch={patch} terrain={terrain} />
         ))}
 
+        {animals.map((a) => (
+          <AnimalMesh key={a.id} animal={a} groundY={groundAt(built, a.x, a.z)} />
+        ))}
+
         {travellers.map((t) => (
           <Wisp key={t.id} traveller={t} />
         ))}
@@ -491,14 +811,15 @@ export default function World() {
           channel={channelRef}
           selfId={selfId}
           onOpenDraw={(x, z) => setDrawAt({ x, z })}
-          isDrawing={drawAt !== null}
+          onOpenAnimalDraw={(x, z) => setAnimalDrawAt({ x, z })}
+          isModalOpen={isModalOpen}
         />
       </Canvas>
 
       <div className="pointer-events-none absolute left-6 top-6 rounded-lg bg-black/50 p-4 backdrop-blur">
         <h1 className="text-lg font-semibold text-white">Infinite Terra</h1>
         <p className="mt-1 text-sm text-white/70">
-          {patches.length} landform{patches.length === 1 ? '' : 's'} · {label}
+          {patches.length} landform{patches.length === 1 ? '' : 's'} · {animals.length} animal{animals.length === 1 ? '' : 's'} · {label}
         </p>
       </div>
 
@@ -509,7 +830,8 @@ export default function World() {
           <span className="text-white/85">Shift</span> to run
         </p>
         <p>
-          <span className="text-white/85">E</span> to raise mountains here ·{' '}
+          <span className="text-white/85">E</span> to raise mountains ·{' '}
+          <span className="text-white/85">R</span> to create animal ·{' '}
           <span className="text-white/85">Esc</span> to release
         </p>
       </div>
@@ -520,13 +842,22 @@ export default function World() {
           onCommit={(grid) => commit(grid, drawAt.x, drawAt.z)}
         />
       )}
+
+      {animalDrawAt && (
+        <AnimalDrawPanel
+          onCancel={() => setAnimalDrawAt(null)}
+          onCommit={(outlineGrid, patternGrid) =>
+            commitAnimal(outlineGrid, patternGrid, animalDrawAt.x, animalDrawAt.z)
+          }
+        />
+      )}
     </div>
   );
 }
 
 /* ------------------------------------------------------------ draw panel --- */
 
-function DrawPanel({
+export function DrawPanel({
   onCommit,
   onCancel,
 }: {
@@ -535,6 +866,10 @@ function DrawPanel({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
+  const lastPos = useRef<{ x: number; y: number } | null>(null);
+
+  const [color, setColor] = useState('#000000');
+  const [markerSize, setMarkerSize] = useState(16);
 
   useEffect(() => {
     const ctx = canvasRef.current?.getContext('2d');
@@ -543,25 +878,57 @@ function DrawPanel({
     ctx.fillRect(0, 0, 512, 512);
   }, []);
 
-  const paint = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!drawing.current) return;
+  const getCanvasCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const c = canvasRef.current;
-    const ctx = c?.getContext('2d');
-    if (!c || !ctx) return;
+    if (!c) return null;
     const r = c.getBoundingClientRect();
-    const x = ((e.clientX - r.left) / r.width) * c.width;
-    const y = ((e.clientY - r.top) / r.height) * c.height;
+    return {
+      x: ((e.clientX - r.left) / r.width) * c.width,
+      y: ((e.clientY - r.top) / r.height) * c.height,
+    };
+  };
 
-    // Soft wide brush: gradients give the heightmap slopes to work with,
-    // where a hard 1px pen produces a wall.
-    const g = ctx.createRadialGradient(x, y, 0, x, y, 28);
-    g.addColorStop(0, 'rgba(0,0,0,0.9)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(x, y, 28, 0, Math.PI * 2);
-    ctx.fill();
-  }, []);
+  const drawLine = useCallback(
+    (from: { x: number; y: number }, to: { x: number; y: number }) => {
+      const ctx = canvasRef.current?.getContext('2d');
+      if (!ctx) return;
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = markerSize;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    },
+    [color, markerSize]
+  );
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    drawing.current = true;
+    const pos = getCanvasCoords(e);
+    if (!pos) return;
+    lastPos.current = pos;
+
+    // Draw a point immediately for single taps
+    drawLine(pos, pos);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!drawing.current) return;
+    const pos = getCanvasCoords(e);
+    if (!pos || !lastPos.current) return;
+
+    drawLine(lastPos.current, pos);
+    lastPos.current = pos;
+  };
+
+  const stopDrawing = () => {
+    drawing.current = false;
+    lastPos.current = null;
+  };
 
   const submit = useCallback(() => {
     const c = canvasRef.current;
@@ -569,7 +936,6 @@ function DrawPanel({
     if (!c || !ctx) return;
     const img = ctx.getImageData(0, 0, c.width, c.height);
 
-    // Downsample straight to the stored grid.
     const grid = new Float32Array(SKETCH_GRID * SKETCH_GRID);
     const step = c.width / SKETCH_GRID;
     for (let gy = 0; gy < SKETCH_GRID; gy++) {
@@ -581,7 +947,7 @@ function DrawPanel({
             const i = (y * c.width + x) * 4;
             const lum =
               (0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2]) / 255;
-            acc += 1 - lum; // dark ink = high ground
+            acc += 1 - lum; // darker ink = higher density
             n++;
           }
         }
@@ -600,21 +966,53 @@ function DrawPanel({
       <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
         <h2 className="text-lg font-semibold text-white">Raise mountains here</h2>
         <p className="mt-1 text-sm text-white/60">
-          Draw a ridgeline — darker and thicker means higher ground.
+          Draw a ridgeline — darker strokes create higher ground.
         </p>
+
+        {/* Toolbar: Colors and Marker Sizes */}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+          <div className="flex flex-wrap gap-1.5">
+            {COLOR_PALETTE.map((c) => (
+              <button
+                key={c.value}
+                onClick={() => setColor(c.value)}
+                title={c.name}
+                className={`h-6 w-6 rounded-full border transition-transform ${
+                  color === c.value
+                    ? 'scale-110 border-white ring-2 ring-white/50'
+                    : 'border-transparent hover:scale-105'
+                }`}
+                style={{ backgroundColor: c.value }}
+              />
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1">
+            {MARKER_SIZES.map((s) => (
+              <button
+                key={s.label}
+                onClick={() => setMarkerSize(s.size)}
+                className={`h-7 w-7 rounded-md text-xs font-semibold ${
+                  markerSize === s.size
+                    ? 'bg-white text-black'
+                    : 'bg-white/10 text-white/70 hover:bg-white/20'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <canvas
           ref={canvasRef}
           width={512}
           height={512}
-          onPointerDown={(e) => {
-            drawing.current = true;
-            paint(e);
-          }}
-          onPointerMove={paint}
-          onPointerUp={() => (drawing.current = false)}
-          onPointerLeave={() => (drawing.current = false)}
-          className="mt-4 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={stopDrawing}
+          onPointerLeave={stopDrawing}
+          className="mt-3 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
         />
 
         <div className="mt-4 flex justify-end gap-3">
@@ -630,6 +1028,218 @@ function DrawPanel({
           >
             Raise it
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------- animal draw panel --- */
+
+export function AnimalDrawPanel({
+  onCommit,
+  onCancel,
+}: {
+  onCommit: (
+    outlineGrid: Float32Array<ArrayBuffer>,
+    patternGrid: Float32Array<ArrayBuffer>,
+  ) => void;
+  onCancel: () => void;
+}) {
+  const [step, setStep] = useState<'outline' | 'pattern'>('outline');
+  const [outlineGrid, setOutlineGrid] = useState<Float32Array<ArrayBuffer> | null>(null);
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawing = useRef(false);
+  const lastPos = useRef<{ x: number; y: number } | null>(null);
+
+  const [color, setColor] = useState('#000000');
+  const [markerSize, setMarkerSize] = useState(14);
+
+  // Reset/Clear canvas when stepping between outline and pattern
+  useEffect(() => {
+    const ctx = canvasRef.current?.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, 512, 512);
+  }, [step]);
+
+  const getCanvasCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const c = canvasRef.current;
+    if (!c) return null;
+    const r = c.getBoundingClientRect();
+    return {
+      x: ((e.clientX - r.left) / r.width) * c.width,
+      y: ((e.clientY - r.top) / r.height) * c.height,
+    };
+  };
+
+  const drawLine = useCallback(
+    (from: { x: number; y: number }, to: { x: number; y: number }) => {
+      const ctx = canvasRef.current?.getContext('2d');
+      if (!ctx) return;
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = markerSize;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    },
+    [color, markerSize]
+  );
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    drawing.current = true;
+    const pos = getCanvasCoords(e);
+    if (!pos) return;
+    lastPos.current = pos;
+
+    drawLine(pos, pos);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!drawing.current) return;
+    const pos = getCanvasCoords(e);
+    if (!pos || !lastPos.current) return;
+
+    drawLine(lastPos.current, pos);
+    lastPos.current = pos;
+  };
+
+  const stopDrawing = () => {
+    drawing.current = false;
+    lastPos.current = null;
+  };
+
+  const captureGrid = useCallback(() => {
+    const c = canvasRef.current;
+    const ctx = c?.getContext('2d');
+    if (!c || !ctx) return new Float32Array(SKETCH_GRID * SKETCH_GRID);
+    const img = ctx.getImageData(0, 0, c.width, c.height);
+
+    const grid = new Float32Array(SKETCH_GRID * SKETCH_GRID);
+    const pixelStep = c.width / SKETCH_GRID;
+    for (let gy = 0; gy < SKETCH_GRID; gy++) {
+      for (let gx = 0; gx < SKETCH_GRID; gx++) {
+        let acc = 0;
+        let n = 0;
+        for (let y = Math.floor(gy * pixelStep); y < Math.floor((gy + 1) * pixelStep); y++) {
+          for (let x = Math.floor(gx * pixelStep); x < Math.floor((gx + 1) * pixelStep); x++) {
+            const i = (y * c.width + x) * 4;
+            const lum =
+              (0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2]) / 255;
+            acc += 1 - lum;
+            n++;
+          }
+        }
+        grid[gy * SKETCH_GRID + gx] = n ? acc / n : 0;
+      }
+    }
+    return grid;
+  }, []);
+
+  const handleNext = () => {
+    const grid = captureGrid();
+    setOutlineGrid(grid);
+    setStep('pattern');
+    setMarkerSize(20); // Default to slightly larger marker for pattern stage
+  };
+
+  const handleDone = () => {
+    if (!outlineGrid) return;
+    const patternGrid = captureGrid();
+    onCommit(outlineGrid, patternGrid);
+  };
+
+  return (
+    <div
+      className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
+        <h2 className="text-lg font-semibold text-white">
+          {step === 'outline' ? '1. Draw Animal Outline' : '2. Draw Animal Pattern'}
+        </h2>
+        <p className="mt-1 text-sm text-white/60">
+          {step === 'outline'
+            ? 'Sketch the profile silhouette of your creature.'
+            : 'Paint spots, stripes, or skin details onto the form.'}
+        </p>
+
+        {/* Toolbar: Colors and Marker Sizes */}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+          <div className="flex flex-wrap gap-1.5">
+            {COLOR_PALETTE.map((c) => (
+              <button
+                key={c.value}
+                onClick={() => setColor(c.value)}
+                title={c.name}
+                className={`h-6 w-6 rounded-full border transition-transform ${
+                  color === c.value
+                    ? 'scale-110 border-white ring-2 ring-white/50'
+                    : 'border-transparent hover:scale-105'
+                }`}
+                style={{ backgroundColor: c.value }}
+              />
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1">
+            {MARKER_SIZES.map((s) => (
+              <button
+                key={s.label}
+                onClick={() => setMarkerSize(s.size)}
+                className={`h-7 w-7 rounded-md text-xs font-semibold ${
+                  markerSize === s.size
+                    ? 'bg-white text-black'
+                    : 'bg-white/10 text-white/70 hover:bg-white/20'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <canvas
+          ref={canvasRef}
+          width={512}
+          height={512}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={stopDrawing}
+          onPointerLeave={stopDrawing}
+          className="mt-3 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
+        />
+
+        <div className="mt-4 flex justify-end gap-3">
+          <button
+            onClick={onCancel}
+            className="rounded-md border border-white/15 px-4 py-2 text-sm text-white/80 hover:bg-white/10"
+          >
+            Cancel
+          </button>
+
+          {step === 'outline' ? (
+            <button
+              onClick={handleNext}
+              className="rounded-md bg-amber-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-amber-400"
+            >
+              Next: Pattern
+            </button>
+          ) : (
+            <button
+              onClick={handleDone}
+              className="rounded-md bg-emerald-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-emerald-400"
+            >
+              Done & Spawn
+            </button>
+          )}
         </div>
       </div>
     </div>
