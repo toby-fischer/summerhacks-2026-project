@@ -211,17 +211,26 @@ function Walker({
   channel,
   selfId,
   onOpenDraw,
+  isDrawing,
 }: {
   built: { patch: Patch; terrain: TerrainData }[];
   channel: React.RefObject<RealtimeChannel | null>;
   selfId: string;
   onOpenDraw: (x: number, z: number) => void;
+  isDrawing: boolean;
 }) {
   const { camera } = useThree();
   const move = useRef({ f: false, b: false, l: false, r: false, sprint: false });
   const dir = useRef(new THREE.Vector3());
   const lastSend = useRef(0);
   const locked = useRef(false);
+
+  // Force exit pointer lock whenever the draw modal opens
+  useEffect(() => {
+    if (isDrawing) {
+      document.exitPointerLock();
+    }
+  }, [isDrawing]);
 
   useEffect(() => {
     const set = (code: string, v: boolean) => {
@@ -232,9 +241,12 @@ function Walker({
       if (code === 'ShiftLeft' || code === 'ShiftRight') move.current.sprint = v;
     };
     const down = (e: KeyboardEvent) => {
+      if (isDrawing) return;
+
       set(e.code, true);
       if (e.code === 'KeyE' && locked.current) {
         e.preventDefault();
+        document.exitPointerLock();
         onOpenDraw(camera.position.x, camera.position.z);
       }
     };
@@ -249,9 +261,11 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw]);
+  }, [camera, onOpenDraw, isDrawing]);
 
   useFrame((_, delta) => {
+    if (isDrawing) return;
+
     const m = move.current;
     const speed = (m.sprint ? 40 : 16) * delta;
     const fwd = Number(m.b) - Number(m.f);
@@ -266,7 +280,6 @@ function Walker({
       }
     }
 
-    // Stick to whatever terrain is underfoot; lerped so a ridge is a fall.
     const ground = groundAt(built, camera.position.x, camera.position.z) + EYE;
     camera.position.y += (ground - camera.position.y) * Math.min(1, delta * 10);
 
@@ -285,6 +298,9 @@ function Walker({
       });
     }
   });
+
+  // Completely unmount PointerLockControls while drawing so pointer clicks do not re-trigger lock
+  if (isDrawing) return null;
 
   return (
     <PointerLockControls
@@ -475,6 +491,7 @@ export default function World() {
           channel={channelRef}
           selfId={selfId}
           onOpenDraw={(x, z) => setDrawAt({ x, z })}
+          isDrawing={drawAt !== null}
         />
       </Canvas>
 
@@ -575,7 +592,11 @@ function DrawPanel({
   }, [onCommit]);
 
   return (
-    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm">
+    <div
+      className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+    >
       <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
         <h2 className="text-lg font-semibold text-white">Raise mountains here</h2>
         <p className="mt-1 text-sm text-white/60">
