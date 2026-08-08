@@ -399,14 +399,46 @@ function Walker({
       original(...args);
     };
 
-    const onRejection = (e: PromiseRejectionEvent) => {
-      if (isPointerLockNoise(e.reason)) e.preventDefault();
+    // The rejections have to be stopped at the source, not caught downstream.
+    //
+    // In modern Chrome requestPointerLock() returns a Promise, and
+    // three-stdlib's PointerLockControls calls it without a .catch() — so a
+    // refused lock is by definition an *unhandled* rejection. Listening for
+    // 'unhandledrejection' and calling preventDefault() does not help: Next's
+    // app router registers its own listener when it mounts, which is before
+    // this component exists, and listeners fire in registration order. Next
+    // has already forwarded it to the dev overlay and the server log by the
+    // time we see it.
+    //
+    // So attach the .catch() the library omitted.
+    //
+    // Patched on Element.prototype rather than on one node: the controls lock
+    // `this.domElement`, which is the canvas drei created, and that element is
+    // replaced whenever the Canvas remounts. Patching the prototype covers
+    // whichever element ends up being the one asked to lock.
+    type Lockable = {
+      requestPointerLock: (options?: PointerLockOptions) => Promise<void> | void;
     };
-    window.addEventListener('unhandledrejection', onRejection);
+    const proto = Element.prototype as unknown as Lockable;
+    const originalRequest = proto.requestPointerLock;
+
+    proto.requestPointerLock = function patched(this: Element, ...args: [PointerLockOptions?]) {
+      const result = originalRequest.apply(this, args) as Promise<void> | void;
+      if (result && typeof (result as Promise<void>).catch === 'function') {
+        return (result as Promise<void>).catch((err: unknown) => {
+          // Expected refusals stay silent; the next click succeeds. Anything
+          // else is reported rather than re-thrown, since re-throwing inside a
+          // catch would recreate the very unhandled rejection this exists to
+          // prevent — and a real pointer-lock failure should be visible.
+          if (!isPointerLockNoise(err)) original('pointer lock failed', err);
+        });
+      }
+      return result;
+    } as Lockable['requestPointerLock'];
 
     return () => {
       console.error = original;
-      window.removeEventListener('unhandledrejection', onRejection);
+      proto.requestPointerLock = originalRequest;
     };
   }, []);
 
