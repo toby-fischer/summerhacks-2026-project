@@ -16,6 +16,7 @@ import { PointerLockControls, Sky, Stars } from '@react-three/drei';
 import { createClient } from '@supabase/supabase-js';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import * as THREE from 'three';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 import { heightAt, synthesize, type TerrainData } from './terrain';
 import {
@@ -47,6 +48,398 @@ interface Patch {
   sketch: string;
   seed: number;
 }
+
+interface VegetationInstance {
+  position: [number, number, number];
+  rotation: number;
+  scale: number;
+  color: [number, number, number];
+  normal: [number, number, number];
+}
+
+interface VegetationPatch {
+  id: string;
+  type: string;
+  instances: VegetationInstance[];
+}
+
+const hashString = (value: string) => {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return hash >>> 0;
+};
+
+const seededRandom = (seed: number) => {
+  let value = seed;
+  return () => {
+    value ^= value << 13;
+    value ^= value >>> 17;
+    value ^= value << 5;
+    return (value >>> 0) / 0xffffffff;
+  };
+};
+
+const vegetationColor = (type: string) => {
+  const lower = type.toLowerCase();
+  const color = new THREE.Color();
+  if (lower.includes('cherry')) return color.set('#f2b8de');
+  if (lower.includes('blossom')) return color.set('#f8d5e6');
+  if (lower.includes('dead') || lower.includes('withered') || lower.includes('burnt')) return color.set('#7d6b59');
+  if (lower.includes('forest')) return color.set('#3e6a37');
+  if (lower.includes('cactus')) return color.set('#7ca64b');
+  return color.set('#5a8b3f');
+};
+
+type PlantShape =
+  | 'oak'
+  | 'pine'
+  | 'maple'
+  | 'willow'
+  | 'palm'
+  | 'cactus'
+  | 'succulent'
+  | 'flower'
+  | 'rose'
+  | 'tulip'
+  | 'sunflower'
+  | 'grass'
+  | 'fern'
+  | 'bush'
+  | 'shrub'
+  | 'mushroom'
+  | 'generic';
+
+const plantStyleFromType = (type: string): {
+  species: PlantShape;
+  height: number;
+  trunkRadius: number;
+  canopyRadius: number;
+  trunkColor: THREE.Color;
+  leafColor: THREE.Color;
+  bloomColor: THREE.Color | null;
+  accentColor: THREE.Color;
+  detail: number;
+} => {
+  const lower = type.toLowerCase();
+  const rand = seededRandom(hashString(type));
+
+  const species: PlantShape = /rose/.test(lower)
+    ? 'rose'
+    : /tulip/.test(lower)
+    ? 'tulip'
+    : /sunflower/.test(lower)
+    ? 'sunflower'
+    : /cherry/.test(lower)
+    ? 'flower'
+    : /palm|coconut|date/.test(lower)
+    ? 'palm'
+    : /willow/.test(lower)
+    ? 'willow'
+    : /pine|spruce|fir|cedar|redwood|sequoia/.test(lower)
+    ? 'pine'
+    : /oak/.test(lower)
+    ? 'oak'
+    : /maple/.test(lower)
+    ? 'maple'
+    : /cactus|saguaro|succulent|aloe|agave/.test(lower)
+    ? 'cactus'
+    : /fern/.test(lower)
+    ? 'fern'
+    : /grass|reed|moss|lawn|wheat|barley|hay/.test(lower)
+    ? 'grass'
+    : /mushroom|fungus/.test(lower)
+    ? 'mushroom'
+    : /bush|shrub|hedge|holly|azalea|boxwood/.test(lower)
+    ? 'bush'
+    : /flower|blossom|orchid|lily|daisy|poppy|lotus/.test(lower)
+    ? 'flower'
+    : 'generic';
+
+  const height = Math.max(0.6, Math.min(2.4, 0.8 + rand() * 1.6));
+  const canopyRadius = Math.max(0.18, Math.min(0.7, 0.22 + rand() * 0.5));
+  const trunkRadius = Math.max(0.05, Math.min(0.2, 0.06 + rand() * 0.12));
+
+  const leafColor = vegetationColor(type).lerp(
+    new THREE.Color('#8faf5c'), /flower|blossom/.test(lower) ? 0.18 : 0.08,
+  );
+
+  const bloomColor = /rose|tulip|sunflower|daisy|poppy|orchid|lotus|cherry/.test(lower)
+    ? new THREE.Color(
+        lower.includes('rose')
+          ? '#d64d6b'
+          : lower.includes('tulip')
+          ? '#ff7fb2'
+          : lower.includes('sunflower')
+          ? '#ffd73e'
+          : lower.includes('orchid')
+          ? '#d79cd3'
+          : lower.includes('lotus')
+          ? '#f9d5d2'
+          : lower.includes('daisy')
+          ? '#f5e8a2'
+          : '#f8b8d8',
+      )
+    : null;
+
+  return {
+    species,
+    height,
+    trunkRadius,
+    canopyRadius,
+    trunkColor: new THREE.Color('#6b4a2f').lerp(new THREE.Color('#8c6d49'), rand() * 0.3),
+    leafColor,
+    bloomColor,
+    accentColor: bloomColor ?? vegetationColor(type).lerp(new THREE.Color('#5d8b51'), 0.12),
+    detail: 1 + Math.round(rand() * 2),
+  };
+};
+
+const paintVertexColors = (geometry: THREE.BufferGeometry, color: THREE.Color) => {
+  const count = geometry.attributes.position.count;
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    colors[i * 3] = color.r;
+    colors[i * 3 + 1] = color.g;
+    colors[i * 3 + 2] = color.b;
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+};
+
+const createFlowerHead = (style: ReturnType<typeof plantStyleFromType>) => {
+  const petals: THREE.BufferGeometry[] = [];
+  const petalCount = 5 + style.detail * 2;
+  for (let i = 0; i < petalCount; i++) {
+    const petal = new THREE.SphereGeometry(style.canopyRadius * 0.45, 8, 6);
+    petal.scale(1, 0.35, 0.5);
+    const angle = (i / petalCount) * Math.PI * 2;
+    petal.translate(
+      Math.cos(angle) * style.canopyRadius * 0.42,
+      style.height + style.canopyRadius * 0.72,
+      Math.sin(angle) * style.canopyRadius * 0.42,
+    );
+    petal.rotateX(-Math.PI / 6);
+    petal.rotateY(angle);
+    paintVertexColors(petal, style.leafColor);
+    petals.push(petal);
+  }
+
+  const center = new THREE.SphereGeometry(style.canopyRadius * 0.25, 10, 8);
+  center.translate(0, style.height + style.canopyRadius * 0.72, 0);
+  paintVertexColors(center, style.accentColor);
+  return BufferGeometryUtils.mergeGeometries([...petals, center], false) as THREE.BufferGeometry;
+};
+
+const createCactusBody = (style: ReturnType<typeof plantStyleFromType>) => {
+  const segments = 2 + style.detail;
+  const pieces: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < segments; i++) {
+    const radius = style.canopyRadius * (0.9 - i * 0.12);
+    const height = 0.5 + i * 0.15;
+    const piece = new THREE.CylinderGeometry(radius, radius, height, 8, 1);
+    piece.translate(0, style.height * 0.3 + i * 0.35, 0);
+    paintVertexColors(piece, style.leafColor);
+    pieces.push(piece);
+  }
+  return BufferGeometryUtils.mergeGeometries(pieces, false) as THREE.BufferGeometry;
+};
+
+const createFernBlades = (style: ReturnType<typeof plantStyleFromType>) => {
+  const blades: THREE.BufferGeometry[] = [];
+  const count = 4 + style.detail * 2;
+  for (let i = 0; i < count; i++) {
+    const blade = new THREE.PlaneGeometry(style.canopyRadius * 0.15, style.height * 1.1, 4, 10);
+    blade.rotateY((Math.PI / count) * i);
+    blade.rotateZ(-Math.PI / 4);
+    blade.translate(0, style.height * 0.6, 0);
+    paintVertexColors(blade, style.leafColor);
+    blades.push(blade);
+  }
+  return BufferGeometryUtils.mergeGeometries(blades, false) as THREE.BufferGeometry;
+};
+
+const createBushCanopy = (style: ReturnType<typeof plantStyleFromType>) => {
+  const clumps: THREE.BufferGeometry[] = [];
+  const count = 3 + style.detail;
+  for (let i = 0; i < count; i++) {
+    const sphere = new THREE.SphereGeometry(style.canopyRadius * (0.7 + Math.random() * 0.2), 10, 8);
+    const angle = (Math.PI * 2 * i) / count;
+    sphere.translate(
+      Math.cos(angle) * style.canopyRadius * 0.3,
+      style.height + style.canopyRadius * 0.2 + Math.random() * 0.1,
+      Math.sin(angle) * style.canopyRadius * 0.3,
+    );
+    paintVertexColors(sphere, style.leafColor);
+    clumps.push(sphere);
+  }
+  return BufferGeometryUtils.mergeGeometries(clumps, false) as THREE.BufferGeometry;
+};
+
+const createPlantGeometry = (type: string): THREE.BufferGeometry => {
+  const style = plantStyleFromType(type);
+  const trunk = new THREE.CylinderGeometry(style.trunkRadius, style.trunkRadius, style.height, 10, 1, false);
+  trunk.translate(0, style.height / 2, 0);
+  paintVertexColors(trunk, style.trunkColor);
+
+  let canopy: THREE.BufferGeometry;
+  switch (style.species) {
+    case 'oak':
+    case 'maple': {
+      const spheres: THREE.BufferGeometry[] = [];
+      const rings = 3 + style.detail;
+      for (let i = 0; i < rings; i++) {
+        const radius = style.canopyRadius * (1 - i * 0.15);
+        const sphere = new THREE.SphereGeometry(radius, 12, 10);
+        sphere.translate(0, style.height + radius * 0.4 - i * 0.1, 0);
+        paintVertexColors(sphere, style.leafColor);
+        spheres.push(sphere);
+      }
+      canopy = BufferGeometryUtils.mergeGeometries(spheres, false) as THREE.BufferGeometry;
+      break;
+    }
+    case 'pine': {
+      const cones: THREE.BufferGeometry[] = [];
+      const levels = 3 + style.detail;
+      for (let i = 0; i < levels; i++) {
+        const radius = style.canopyRadius * (1 - i * 0.18);
+        const cone = new THREE.ConeGeometry(radius, radius * 1.2, 10, 1);
+        cone.translate(0, style.height + (levels - i) * 0.25, 0);
+        paintVertexColors(cone, style.leafColor);
+        cones.push(cone);
+      }
+      canopy = BufferGeometryUtils.mergeGeometries(cones, false) as THREE.BufferGeometry;
+      break;
+    }
+    case 'willow': {
+      const droops: THREE.BufferGeometry[] = [];
+      const branches = 5 + style.detail;
+      for (let i = 0; i < branches; i++) {
+        const branch = new THREE.CylinderGeometry(style.canopyRadius * 0.05, style.canopyRadius * 0.08, style.canopyRadius * 2.2, 6, 1, true);
+        branch.rotateZ(Math.PI / 2);
+        branch.rotateY((i / branches) * Math.PI * 2);
+        branch.translate(0, style.height + 0.2, 0);
+        paintVertexColors(branch, style.leafColor);
+        droops.push(branch);
+      }
+      canopy = BufferGeometryUtils.mergeGeometries(droops, false) as THREE.BufferGeometry;
+      break;
+    }
+    case 'palm': {
+      const rings: THREE.BufferGeometry[] = [];
+      for (let i = 0; i < 4; i++) {
+        const segment = new THREE.CylinderGeometry(style.trunkRadius * 1.1, style.trunkRadius * 1.3, 0.35, 8, 1);
+        segment.translate(0, style.height * 0.15 + i * 0.25, 0);
+        paintVertexColors(segment, style.trunkColor);
+        rings.push(segment);
+      }
+      const fronds: THREE.BufferGeometry[] = [];
+      for (let i = 0; i < 6; i++) {
+        const blade = new THREE.PlaneGeometry(style.canopyRadius * 0.18, style.canopyRadius * 1.3, 6, 1);
+        blade.rotateX(-Math.PI / 2.7);
+        blade.rotateY((i / 6) * Math.PI * 2);
+        blade.translate(0, style.height + 0.2, 0);
+        paintVertexColors(blade, style.leafColor);
+        fronds.push(blade);
+      }
+      canopy = BufferGeometryUtils.mergeGeometries([...rings, ...fronds], false) as THREE.BufferGeometry;
+      break;
+    }
+    case 'cactus':
+    case 'succulent':
+      canopy = createCactusBody(style);
+      break;
+    case 'flower':
+    case 'rose':
+    case 'tulip':
+    case 'sunflower':
+      canopy = createFlowerHead(style);
+      break;
+    case 'fern':
+      canopy = createFernBlades(style);
+      break;
+    case 'grass':
+      canopy = createFernBlades(style);
+      break;
+    case 'mushroom': {
+      const cap = new THREE.SphereGeometry(style.canopyRadius, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+      cap.translate(0, style.height + 0.1, 0);
+      const stem = new THREE.CylinderGeometry(style.trunkRadius * 0.4, style.trunkRadius * 0.5, style.height * 0.6, 8);
+      stem.translate(0, style.height * 0.3, 0);
+      paintVertexColors(cap, style.leafColor);
+      paintVertexColors(stem, style.trunkColor);
+      canopy = BufferGeometryUtils.mergeGeometries([cap, stem], false) as THREE.BufferGeometry;
+      break;
+    }
+    case 'bush':
+    case 'shrub':
+      canopy = createBushCanopy(style);
+      break;
+    default:
+      canopy = new THREE.SphereGeometry(style.canopyRadius, 10, 8);
+      canopy.translate(0, style.height + style.canopyRadius * 0.7, 0);
+      paintVertexColors(canopy, style.leafColor);
+  }
+
+  if (style.species !== 'flower' && style.species !== 'rose' && style.species !== 'tulip' && style.species !== 'sunflower') {
+    paintVertexColors(canopy, style.leafColor);
+  }
+  const geometry = BufferGeometryUtils.mergeGeometries([trunk, canopy], false) as THREE.BufferGeometry;
+  geometry.computeVertexNormals();
+  return geometry;
+};
+
+const surfaceNormal = (
+  built: { patch: Patch; terrain: TerrainData }[],
+  x: number,
+  z: number,
+) => {
+  const y = groundAt(built, x, z);
+  const dx = groundAt(built, x + 1, z) - y;
+  const dz = groundAt(built, x, z + 1) - y;
+  const normal = new THREE.Vector3(-dx, 1, -dz).normalize();
+  const slope = Math.sqrt(dx * dx + dz * dz);
+  return { normal, slope };
+};
+
+const createVegetationPatch = (
+  built: { patch: Patch; terrain: TerrainData }[],
+  x: number,
+  z: number,
+  type: string,
+) => {
+  const seed = hashString(`${type}:${x.toFixed(2)}:${z.toFixed(2)}`);
+  const rand = seededRandom(seed);
+  const instances: VegetationInstance[] = [];
+  const radius = 20;
+  const target = 180;
+
+  for (let i = 0; i < target * 3 && instances.length < target; i++) {
+    const angle = rand() * Math.PI * 2;
+    const distance = Math.sqrt(rand()) * radius;
+    const px = x + Math.cos(angle) * distance;
+    const pz = z + Math.sin(angle) * distance;
+    const { normal, slope } = surfaceNormal(built, px, pz);
+    if (slope > 0.25) continue;
+
+    const height = groundAt(built, px, pz);
+    const scale = 0.6 + rand() * 1.0;
+    instances.push({
+      position: [px, height, pz],
+      rotation: rand() * Math.PI * 2,
+      scale,
+      color: vegetationColor(type).toArray() as [number, number, number],
+      normal: [normal.x, normal.y, normal.z],
+    });
+  }
+
+  return {
+    id: `${Date.now()}-${type.replace(/\s+/g, '-')}`,
+    type,
+    instances,
+  };
+};
 
 /* ------------------------------------------------------------ encoding --- */
 
@@ -202,18 +595,82 @@ function Wisp({ traveller }: { traveller: Traveller }) {
   );
 }
 
+function PlantInstances({
+  geometry,
+  instances,
+}: {
+  geometry: THREE.BufferGeometry;
+  instances: VegetationInstance[];
+}) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+
+  useEffect(() => {
+    if (!meshRef.current) return;
+    instances.forEach((instance, index) => {
+      dummy.position.set(...instance.position);
+      dummy.rotation.set(0, instance.rotation, 0);
+      dummy.scale.setScalar(instance.scale);
+      dummy.updateMatrix();
+      meshRef.current!.setMatrixAt(index, dummy.matrix);
+    });
+    meshRef.current.count = instances.length;
+    meshRef.current.instanceMatrix.needsUpdate = true;
+  }, [instances, dummy, geometry]);
+
+  return (
+    <instancedMesh ref={meshRef} args={[geometry, undefined, instances.length]} castShadow receiveShadow>
+      <meshStandardMaterial vertexColors roughness={0.7} metalness={0.08} />
+    </instancedMesh>
+  );
+}
+
+function VegetationLayer({ patches }: { patches: VegetationPatch[] }) {
+  const plantsByType = useMemo(() => {
+    const groups = new Map<string, VegetationInstance[]>();
+    for (const patch of patches) {
+      const list = groups.get(patch.type) ?? [];
+      list.push(...patch.instances);
+      groups.set(patch.type, list);
+    }
+    return groups;
+  }, [patches]);
+
+  const plantGeometries = useMemo(() => {
+    const map = new Map<string, THREE.BufferGeometry>();
+    for (const type of plantsByType.keys()) {
+      map.set(type, createPlantGeometry(type));
+    }
+    return map;
+  }, [plantsByType]);
+
+  if (!patches.length) return null;
+
+  return (
+    <>
+      {Array.from(plantsByType.entries()).map(([type, instances]) => (
+        <PlantInstances
+          key={type}
+          geometry={plantGeometries.get(type)!}
+          instances={instances}
+        />
+      ))}
+    </>
+  );
+}
+
 /* ------------------------------------------------------------- controls --- */
 
 function Walker({
   built,
   channel,
   selfId,
-  onOpenDraw,
+  onOpenVegetation,
 }: {
   built: { patch: Patch; terrain: TerrainData }[];
   channel: React.RefObject<RealtimeChannel | null>;
   selfId: string;
-  onOpenDraw: (x: number, z: number) => void;
+  onOpenVegetation: (x: number, z: number) => void;
 }) {
   const { camera } = useThree();
   const move = useRef({ f: false, b: false, l: false, r: false, sprint: false });
@@ -234,7 +691,7 @@ function Walker({
       set(e.code, true);
       if (e.code === 'KeyE' && locked.current) {
         e.preventDefault();
-        onOpenDraw(camera.position.x, camera.position.z);
+        onOpenVegetation(camera.position.x, camera.position.z);
       }
     };
     const up = (e: KeyboardEvent) => set(e.code, false);
@@ -248,7 +705,7 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw]);
+  }, [camera, onOpenVegetation]);
 
   useFrame((_, delta) => {
     const m = move.current;
@@ -295,7 +752,8 @@ function Walker({
 export default function World() {
   const [patches, setPatches] = useState<Patch[]>([]);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
-  const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
+  const [vegetationAt, setVegetationAt] = useState<{ x: number; z: number } | null>(null);
+  const [vegetationPatches, setVegetationPatches] = useState<VegetationPatch[]>([]);
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
   );
@@ -318,6 +776,22 @@ export default function World() {
         return { patch, terrain };
       }),
     [patches],
+  );
+
+  const openVegetation = useCallback((x: number, z: number) => {
+    if (document.pointerLockElement) {
+      document.exitPointerLock();
+    }
+    setVegetationAt({ x, z });
+  }, []);
+
+  const plantVegetation = useCallback(
+    (type: string, x: number, z: number) => {
+      if (!type.trim()) return;
+      setVegetationPatches((prev) => [...prev, createVegetationPatch(built, x, z, type.trim())]);
+      setVegetationAt(null);
+    },
+    [built],
   );
 
   /* -------- load + realtime -------- */
@@ -401,39 +875,6 @@ export default function World() {
   }, [selfId]);
 
   /* -------- contribute -------- */
-  const commit = useCallback(
-    (grid: Float32Array<ArrayBuffer>, x: number, z: number) => {
-      const sketch = encodeSketch(grid);
-      const seed = Math.floor(Math.random() * 1e9);
-      const tempId = `temp-${seed}`;
-
-      // Optimistic: the terrain is under your feet immediately, and the write
-      // reconciles behind it.
-      setPatches((prev) => [...prev, { id: tempId, x, z, sketch, seed }]);
-      setDrawAt(null);
-
-      if (!supabase) return;
-
-      supabase
-        .from('world_assets')
-        .insert({ x, z, type: 'terrain', color: '#8fa8c8', properties: { sketch, seed } })
-        .select()
-        .then(({ data, error }) => {
-          setPatches((prev) => {
-            const without = prev.filter((p) => p.id !== tempId);
-            if (error || !data?.length) return without; // roll back on failure
-            const row = data[0] as Record<string, unknown>;
-            const id = String(row.id);
-            cache.current.set(id, cache.current.get(tempId) ?? terrainFor({ id, x, z, sketch, seed }));
-            cache.current.delete(tempId);
-            return without.some((p) => p.id === id)
-              ? without
-              : [...without, { id, x, z, sketch, seed }];
-          });
-        });
-    },
-    [],
-  );
 
   const label =
     status === 'live'
@@ -466,11 +907,12 @@ export default function World() {
           <Wisp key={t.id} traveller={t} />
         ))}
 
+        <VegetationLayer patches={vegetationPatches} />
         <Walker
           built={built}
           channel={channelRef}
           selfId={selfId}
-          onOpenDraw={(x, z) => setDrawAt({ x, z })}
+          onOpenVegetation={openVegetation}
         />
       </Canvas>
 
@@ -488,15 +930,15 @@ export default function World() {
           <span className="text-white/85">Shift</span> to run
         </p>
         <p>
-          <span className="text-white/85">E</span> to raise mountains here ·{' '}
+          <span className="text-white/85">E</span> to plant vegetation here ·{' '}
           <span className="text-white/85">Esc</span> to release
         </p>
       </div>
 
-      {drawAt && (
-        <DrawPanel
-          onCancel={() => setDrawAt(null)}
-          onCommit={(grid) => commit(grid, drawAt.x, drawAt.z)}
+      {vegetationAt && (
+        <VegetationPanel
+          onCancel={() => setVegetationAt(null)}
+          onPlant={(type) => plantVegetation(type, vegetationAt.x, vegetationAt.z)}
         />
       )}
     </div>
@@ -505,91 +947,41 @@ export default function World() {
 
 /* ------------------------------------------------------------ draw panel --- */
 
-function DrawPanel({
-  onCommit,
+function VegetationPanel({
+  onPlant,
   onCancel,
 }: {
-  onCommit: (grid: Float32Array<ArrayBuffer>) => void;
+  onPlant: (type: string) => void;
   onCancel: () => void;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const drawing = useRef(false);
-
-  useEffect(() => {
-    const ctx = canvasRef.current?.getContext('2d');
-    if (!ctx) return;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, 512, 512);
-  }, []);
-
-  const paint = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!drawing.current) return;
-    const c = canvasRef.current;
-    const ctx = c?.getContext('2d');
-    if (!c || !ctx) return;
-    const r = c.getBoundingClientRect();
-    const x = ((e.clientX - r.left) / r.width) * c.width;
-    const y = ((e.clientY - r.top) / r.height) * c.height;
-
-    // Soft wide brush: gradients give the heightmap slopes to work with,
-    // where a hard 1px pen produces a wall.
-    const g = ctx.createRadialGradient(x, y, 0, x, y, 28);
-    g.addColorStop(0, 'rgba(0,0,0,0.9)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(x, y, 28, 0, Math.PI * 2);
-    ctx.fill();
-  }, []);
+  const [type, setType] = useState('');
 
   const submit = useCallback(() => {
-    const c = canvasRef.current;
-    const ctx = c?.getContext('2d');
-    if (!c || !ctx) return;
-    const img = ctx.getImageData(0, 0, c.width, c.height);
-
-    // Downsample straight to the stored grid.
-    const grid = new Float32Array(SKETCH_GRID * SKETCH_GRID);
-    const step = c.width / SKETCH_GRID;
-    for (let gy = 0; gy < SKETCH_GRID; gy++) {
-      for (let gx = 0; gx < SKETCH_GRID; gx++) {
-        let acc = 0;
-        let n = 0;
-        for (let y = Math.floor(gy * step); y < Math.floor((gy + 1) * step); y++) {
-          for (let x = Math.floor(gx * step); x < Math.floor((gx + 1) * step); x++) {
-            const i = (y * c.width + x) * 4;
-            const lum =
-              (0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2]) / 255;
-            acc += 1 - lum; // dark ink = high ground
-            n++;
-          }
-        }
-        grid[gy * SKETCH_GRID + gx] = n ? acc / n : 0;
-      }
-    }
-    onCommit(grid);
-  }, [onCommit]);
+    const trimmed = type.trim();
+    if (!trimmed) return;
+    onPlant(trimmed);
+  }, [onPlant, type]);
 
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm">
       <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
-        <h2 className="text-lg font-semibold text-white">Raise mountains here</h2>
+        <h2 className="text-lg font-semibold text-white">Plant vegetation here</h2>
         <p className="mt-1 text-sm text-white/60">
-          Draw a ridgeline — darker and thicker means higher ground.
+          Type a vegetation type like “cherry blossom” or “dead forest”. Hundreds of plants will appear on the terrain surface.
         </p>
 
-        <canvas
-          ref={canvasRef}
-          width={512}
-          height={512}
-          onPointerDown={(e) => {
-            drawing.current = true;
-            paint(e);
+        <input
+          value={type}
+          onChange={(e) => setType(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              submit();
+            }
           }}
-          onPointerMove={paint}
-          onPointerUp={() => (drawing.current = false)}
-          onPointerLeave={() => (drawing.current = false)}
-          className="mt-4 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
+          placeholder="e.g. cherry blossom, dead forest"
+          className="mt-4 w-full rounded-lg border border-white/15 bg-white/5 px-4 py-3 text-white outline-none placeholder:text-white/40 focus:border-emerald-400"
+          autoFocus
         />
 
         <div className="mt-4 flex justify-end gap-3">
@@ -601,9 +993,10 @@ function DrawPanel({
           </button>
           <button
             onClick={submit}
-            className="rounded-md bg-emerald-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-emerald-400"
+            className="rounded-md bg-emerald-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={!type.trim()}
           >
-            Raise it
+            Plant
           </button>
         </div>
       </div>
