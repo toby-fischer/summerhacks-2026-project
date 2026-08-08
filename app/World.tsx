@@ -52,7 +52,7 @@ const COLOR_PALETTE = [
   { name: 'Blue', value: '#3b82f6' },
   { name: 'Purple', value: '#a855f7' },
   { name: 'Pink', value: '#ec4899' },
-  { name: 'White / Eraser', value: '#ffffff' },
+  { name: 'White', value: '#f0f0f0' },
 ];
 
 const MARKER_SIZES = [
