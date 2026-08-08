@@ -180,18 +180,34 @@ function Walker({
   channel,
   selfId,
   onOpenDraw,
+  onFlyChange,
 }: {
   built: BuiltPatch[];
   channel: React.RefObject<RealtimeChannel | null>;
   selfId: string;
   onOpenDraw: (x: number, z: number) => void;
+  onFlyChange: (flying: boolean) => void;
 }) {
   const { camera } = useThree();
-  const move = useRef({ f: false, b: false, l: false, r: false, sprint: false });
+  const move = useRef({
+    f: false,
+    b: false,
+    l: false,
+    r: false,
+    sprint: false,
+    up: false,
+    down: false,
+  });
   const dir = useRef(new THREE.Vector3());
   const euler = useRef(new THREE.Euler(0, 0, 0, 'YXZ'));
   const lastSend = useRef(0);
   const locked = useRef(false);
+  const flying = useRef(false);
+
+  const clearKeys = () => {
+    const m = move.current;
+    m.f = m.b = m.l = m.r = m.sprint = m.up = m.down = false;
+  };
 
   useEffect(() => {
     const set = (code: string, v: boolean) => {
@@ -200,16 +216,27 @@ function Walker({
       if (code === 'KeyA' || code === 'ArrowLeft') move.current.l = v;
       if (code === 'KeyD' || code === 'ArrowRight') move.current.r = v;
       if (code === 'ShiftLeft' || code === 'ShiftRight') move.current.sprint = v;
+      if (code === 'Space') move.current.up = v;
+      if (code === 'ControlLeft' || code === 'ControlRight' || code === 'KeyC') {
+        move.current.down = v;
+      }
     };
     const down = (e: KeyboardEvent) => {
+      // Space scrolls the page by default, which fights the pointer lock.
+      if (e.code === 'Space' && locked.current) e.preventDefault();
       set(e.code, true);
       if (e.code === 'KeyE' && locked.current) {
         e.preventDefault();
         onOpenDraw(camera.position.x, camera.position.z);
       }
+      if (e.code === 'KeyF' && locked.current && !e.repeat) {
+        e.preventDefault();
+        flying.current = !flying.current;
+        onFlyChange(flying.current);
+      }
     };
     const up = (e: KeyboardEvent) => set(e.code, false);
-    const blur = () => (move.current = { f: false, b: false, l: false, r: false, sprint: false });
+    const blur = clearKeys;
 
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
@@ -219,24 +246,41 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw]);
+  }, [camera, onOpenDraw, onFlyChange]);
 
   useFrame((_, delta) => {
     const m = move.current;
-    const speed = (m.sprint ? 40 : 16) * delta;
+    const fly = flying.current;
+    // Flight is for surveying the whole world, so it moves a lot faster than
+    // walking; sprint stacks on top of that.
+    const speed = (fly ? (m.sprint ? 140 : 55) : m.sprint ? 40 : 16) * delta;
     const fwd = Number(m.b) - Number(m.f);
     const side = Number(m.r) - Number(m.l);
 
     if (fwd || side) {
       dir.current.set(side, 0, fwd).normalize().multiplyScalar(speed);
-      euler.current.set(0, camera.rotation.y, 0);
+      if (fly) {
+        // Follow where you're looking, pitch included — flying with a
+        // yaw-only heading feels like being stuck on a rail.
+        euler.current.set(camera.rotation.x, camera.rotation.y, 0);
+      } else {
+        euler.current.set(0, camera.rotation.y, 0);
+      }
       dir.current.applyEuler(euler.current);
       camera.position.add(dir.current);
     }
 
-    // Stick to whatever terrain is underfoot; lerped so a ridge is a fall.
     const ground = groundAt(built, camera.position.x, camera.position.z) + EYE;
-    camera.position.y += (ground - camera.position.y) * Math.min(1, delta * 10);
+
+    if (fly) {
+      const lift = Number(m.up) - Number(m.down);
+      if (lift) camera.position.y += lift * speed;
+      // Don't let flight bury the camera inside a mountain.
+      if (camera.position.y < ground) camera.position.y = ground;
+    } else {
+      // Stick to whatever terrain is underfoot; lerped so a ridge is a fall.
+      camera.position.y += (ground - camera.position.y) * Math.min(1, delta * 10);
+    }
 
     const now = performance.now();
     const ch = channel.current;
@@ -267,6 +311,7 @@ export default function World() {
   const [patches, setPatches] = useState<Patch[]>([]);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
+  const [flying, setFlying] = useState(false);
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
   );
@@ -461,6 +506,7 @@ export default function World() {
           channel={channelRef}
           selfId={selfId}
           onOpenDraw={(x, z) => setDrawAt({ x, z })}
+          onFlyChange={setFlying}
         />
       </Canvas>
 
@@ -474,13 +520,21 @@ export default function World() {
       <div className="pointer-events-none absolute bottom-6 left-6 space-y-1 text-xs text-white/55">
         <p>
           <span className="text-white/85">Click</span> to look ·{' '}
-          <span className="text-white/85">WASD</span> to walk ·{' '}
-          <span className="text-white/85">Shift</span> to run
+          <span className="text-white/85">WASD</span> to {flying ? 'fly' : 'walk'} ·{' '}
+          <span className="text-white/85">Shift</span> to {flying ? 'boost' : 'run'}
         </p>
         <p>
           <span className="text-white/85">E</span> to raise mountains here ·{' '}
+          <span className="text-white/85">F</span> to {flying ? 'land' : 'fly'} ·{' '}
           <span className="text-white/85">Esc</span> to release
         </p>
+        {flying && (
+          <p className="text-white/85">
+            <span className="text-emerald-300">Flying</span> —{' '}
+            <span className="text-white/85">Space</span> up ·{' '}
+            <span className="text-white/85">Ctrl</span> down
+          </p>
+        )}
       </div>
 
       {drawAt && (
@@ -563,7 +617,10 @@ function DrawPanel({
 
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
+      {/* max-h + scroll: the square canvas makes this dialog tall, and without
+          a cap the style picker and buttons fall off the bottom of a laptop
+          viewport with no way to reach them. */}
+      <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl border border-white/10 bg-neutral-900 p-6">
         <h2 className="text-lg font-semibold text-white">Raise mountains here</h2>
         <p className="mt-1 text-sm text-white/60">
           Draw a ridgeline — darker and thicker means higher ground.
@@ -580,7 +637,7 @@ function DrawPanel({
           onPointerMove={paint}
           onPointerUp={() => (drawing.current = false)}
           onPointerLeave={() => (drawing.current = false)}
-          className="mt-4 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
+          className="mx-auto mt-4 aspect-square w-full max-w-[46vh] cursor-crosshair touch-none rounded-lg bg-white"
         />
 
         {/* Style picker. Each swatch previews its own palette, so the choice
