@@ -44,6 +44,9 @@ const supabase =
 
 const EYE = 1.8;
 
+/** Window for the double-tap-Space flight toggle. Minecraft's is ~300ms. */
+const DOUBLE_TAP_MS = 300;
+
 interface Patch {
   id: string;
   x: number;
@@ -203,6 +206,8 @@ function Walker({
   const lastSend = useRef(0);
   const locked = useRef(false);
   const flying = useRef(false);
+  /** Timestamp of the last Space press, for double-tap detection. */
+  const lastSpace = useRef(0);
 
   const clearKeys = () => {
     const m = move.current;
@@ -215,24 +220,35 @@ function Walker({
       if (code === 'KeyS' || code === 'ArrowDown') move.current.b = v;
       if (code === 'KeyA' || code === 'ArrowLeft') move.current.l = v;
       if (code === 'KeyD' || code === 'ArrowRight') move.current.r = v;
-      if (code === 'ShiftLeft' || code === 'ShiftRight') move.current.sprint = v;
       if (code === 'Space') move.current.up = v;
-      if (code === 'ControlLeft' || code === 'ControlRight' || code === 'KeyC') {
+      // Minecraft overloads Shift: sprint on the ground, descend in the air.
+      if (code === 'ShiftLeft' || code === 'ShiftRight') {
+        move.current.sprint = v;
         move.current.down = v;
       }
     };
     const down = (e: KeyboardEvent) => {
       // Space scrolls the page by default, which fights the pointer lock.
       if (e.code === 'Space' && locked.current) e.preventDefault();
+
+      // Double-tap Space toggles flight. Guard on !repeat so holding Space to
+      // ascend doesn't fire the key-repeat stream into the tap detector and
+      // flip flight off again mid-climb.
+      if (e.code === 'Space' && locked.current && !e.repeat) {
+        const now = performance.now();
+        if (now - lastSpace.current < DOUBLE_TAP_MS) {
+          flying.current = !flying.current;
+          onFlyChange(flying.current);
+          lastSpace.current = 0; // consume, so a third tap starts fresh
+        } else {
+          lastSpace.current = now;
+        }
+      }
+
       set(e.code, true);
       if (e.code === 'KeyE' && locked.current) {
         e.preventDefault();
         onOpenDraw(camera.position.x, camera.position.z);
-      }
-      if (e.code === 'KeyF' && locked.current && !e.repeat) {
-        e.preventDefault();
-        flying.current = !flying.current;
-        onFlyChange(flying.current);
       }
     };
     const up = (e: KeyboardEvent) => set(e.code, false);
@@ -251,9 +267,10 @@ function Walker({
   useFrame((_, delta) => {
     const m = move.current;
     const fly = flying.current;
-    // Flight is for surveying the whole world, so it moves a lot faster than
-    // walking; sprint stacks on top of that.
-    const speed = (fly ? (m.sprint ? 140 : 55) : m.sprint ? 40 : 16) * delta;
+    // Flying is roughly 3x walking, for surveying the whole world. Shift means
+    // "descend" in the air, so it must NOT also boost there — otherwise every
+    // descent doubles your ground speed.
+    const speed = (fly ? 55 : m.sprint ? 40 : 16) * delta;
     const fwd = Number(m.b) - Number(m.f);
     const side = Number(m.r) - Number(m.l);
 
@@ -273,7 +290,8 @@ function Walker({
     const ground = groundAt(built, camera.position.x, camera.position.z) + EYE;
 
     if (fly) {
-      const lift = Number(m.up) - Number(m.down);
+      // Space wins over Shift when both are held, rather than cancelling out.
+      const lift = m.up ? 1 : m.down ? -1 : 0;
       if (lift) camera.position.y += lift * speed;
       // Don't let flight bury the camera inside a mountain.
       if (camera.position.y < ground) camera.position.y = ground;
@@ -520,19 +538,24 @@ export default function World() {
       <div className="pointer-events-none absolute bottom-6 left-6 space-y-1 text-xs text-white/55">
         <p>
           <span className="text-white/85">Click</span> to look ·{' '}
-          <span className="text-white/85">WASD</span> to {flying ? 'fly' : 'walk'} ·{' '}
-          <span className="text-white/85">Shift</span> to {flying ? 'boost' : 'run'}
+          <span className="text-white/85">WASD</span> to {flying ? 'fly' : 'walk'}
+          {!flying && (
+            <>
+              {' '}
+              · <span className="text-white/85">Shift</span> to run
+            </>
+          )}
         </p>
         <p>
           <span className="text-white/85">E</span> to raise mountains here ·{' '}
-          <span className="text-white/85">F</span> to {flying ? 'land' : 'fly'} ·{' '}
-          <span className="text-white/85">Esc</span> to release
+          <span className="text-white/85">Double-tap Space</span> to{' '}
+          {flying ? 'land' : 'fly'} · <span className="text-white/85">Esc</span> to release
         </p>
         {flying && (
-          <p className="text-white/85">
+          <p>
             <span className="text-emerald-300">Flying</span> —{' '}
             <span className="text-white/85">Space</span> up ·{' '}
-            <span className="text-white/85">Ctrl</span> down
+            <span className="text-white/85">Shift</span> down
           </p>
         )}
       </div>
