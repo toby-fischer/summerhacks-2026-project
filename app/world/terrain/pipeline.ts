@@ -309,7 +309,11 @@ function erode(h: Float32Array<ArrayBuffer>, size: number, droplets: number, see
   const evaporate = 0.02;
   const gravity = 4;
   const lifetime = 32;
-  const radius = Math.max(2, Math.round(size / 42));
+  // Brush radius in CELLS. Kept small deliberately: a wide brush on a fine
+  // grid spreads every cut over so much ground that it sands the surface
+  // smooth, which is the opposite of what erosion is here for. 2 cells cuts
+  // valleys with banks while leaving the fine detail band intact.
+  const radius = 2;
 
   const brush = erosionBrush(radius);
   const bLen = brush.weights.length;
@@ -411,6 +415,31 @@ function erode(h: Float32Array<ArrayBuffer>, size: number, droplets: number, see
   }
 }
 
+/**
+ * Clamp lone spikes to their neighbourhood without touching anything else.
+ *
+ * Erosion occasionally leaves a cell far above or below its neighbours. A blur
+ * removes those but costs the fine surface detail too, so instead each cell is
+ * pulled back only as far as the min/max of its 4-neighbourhood — real ridges
+ * and gullies sit within their neighbours' range and pass through untouched.
+ */
+function despike(h: Float32Array<ArrayBuffer>, size: number): void {
+  const src = Float32Array.from(h);
+  for (let y = 1; y < size - 1; y++) {
+    for (let x = 1; x < size - 1; x++) {
+      const i = y * size + x;
+      const n = src[i - size];
+      const s = src[i + size];
+      const w = src[i - 1];
+      const e = src[i + 1];
+      const lo = Math.min(n, s, w, e);
+      const hi = Math.max(n, s, w, e);
+      if (src[i] > hi) h[i] = hi;
+      else if (src[i] < lo) h[i] = lo;
+    }
+  }
+}
+
 function normalize(h: Float32Array<ArrayBuffer>): void {
   let min = Infinity;
   let max = -Infinity;
@@ -469,17 +498,39 @@ export function synthesize(sketch: Float32Array<ArrayBuffer>, opts: TerrainOptio
   let h: Float32Array<ArrayBuffer> = Float32Array.from(sketch);
 
   // 1. Soften the drawing into landform.
-  h = blur(h, size, Math.max(1, Math.round(size / 48)));
+  // Just enough to take the pen jitter off the silhouette. Deliberately a
+  // small fixed radius rather than size/48: when the sketch is upsampled to a
+  // finer grid, a proportional radius would blur away exactly the fine detail
+  // the finer grid exists to carry.
+  h = blur(h, size, 1);
   normalize(h);
 
-  // 2. Fractal detail, weighted by height so ridges get rugged and
-  //    lowlands stay walkable. `ridged` picks the noise character and `warp`
-  //    bends it so ridgelines meander instead of tracing the pen stroke.
+  // 2. Fractal detail in TWO BANDS, which is what keeps one drawn blob reading
+  //    as one mountain instead of a cluster.
+  //
+  //    The low band (frequency 6) is landform-scale: a wavelength of roughly a
+  //    sixth of the patch. Run loud, it sculpts lumps as large as the mountain
+  //    itself and they compete with the summit you drew — that is the clutter.
+  //    So it stays quiet, and only shapes the massif's broad flanks.
+  //
+  //    The high band (frequency 22) is surface-scale — gullies, spurs, broken
+  //    rock. It can be loud without ever inventing a rival peak, because its
+  //    features are far smaller than the landform.
+  //
+  //    Both are still weighted by base height, so lowlands stay walkable.
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const i = y * size + x;
       const base = h[i];
-      const detail = warpedSample((x / size) * 6, (y / size) * 6, seed, warp, ridged) - 0.5;
+      const u = x / size;
+      const v = y / size;
+
+      const coarse = warpedSample(u * 6, v * 6, seed, warp, ridged) - 0.5;
+      const fine = warpedSample(u * 22, v * 22, seed + 7717, warp * 0.4, ridged) - 0.5;
+
+      // Coarse held well back; fine carries most of the visible texture.
+      const detail = coarse * 0.35 + fine * 0.65;
+
       h[i] = base + detail * roughness * (0.25 + base * 0.9);
     }
   }
@@ -488,7 +539,7 @@ export function synthesize(sketch: Float32Array<ArrayBuffer>, opts: TerrainOptio
   // 3. Carve valleys.
   if (droplets > 0) {
     erode(h, size, droplets, seed);
-    h = blur(h, size, 1); // erosion leaves single-cell spikes
+    despike(h, size); // erosion leaves occasional single-cell spikes
     normalize(h);
   }
 

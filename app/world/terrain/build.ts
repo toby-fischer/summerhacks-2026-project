@@ -14,7 +14,7 @@
 // building twice is harmless.
 
 import { synthesize, slopeMap, type TerrainData } from './pipeline';
-import { decodeSketch, SKETCH_GRID, PATCH_SCALE } from './sketch';
+import { decodeSketch, resample, SKETCH_GRID, SYNTH_GRID, PATCH_SCALE } from './sketch';
 import { shadeTerrain } from './shading';
 import { styleFor, optionsFor, type TerrainStyle } from './styles';
 
@@ -85,16 +85,20 @@ function cachedFalloff(size: number): Float32Array {
 export function buildPatch(patch: PatchInput): BuiltPatch {
   const style = styleFor(patch.style);
 
+  // Lift the stored silhouette to the finer synthesis grid first, so the
+  // fractal and erosion passes have room to add detail between drawn cells.
+  const sketch = resample(decodeSketch(patch.sketch), SKETCH_GRID, SYNTH_GRID);
+
   const terrain = synthesize(
-    decodeSketch(patch.sketch),
+    sketch,
     optionsFor(style, {
-      size: SKETCH_GRID,
+      size: SYNTH_GRID,
       scale: PATCH_SCALE,
       seed: patch.seed,
-      // Lighter than a full-page render: patches are smaller and several may
-      // synthesize at once when a new visitor loads the world. Styles that ask
-      // for heavy erosion still get proportionally more.
-      erosion: Math.round(style.shape.erosion * 0.42),
+      // Erosion cost scales with droplet count, not grid size, so the finer
+      // grid is nearly free here. Styles that ask for heavy erosion still get
+      // proportionally more.
+      erosion: Math.round(style.shape.erosion * 0.5),
     }),
   );
 
