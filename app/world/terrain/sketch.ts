@@ -10,19 +10,21 @@ export const SKETCH_GRID = 64;
 /**
  * Footprint of one contributed massif, in metres.
  *
- * Deliberately smaller than the 64-cell sketch grid might suggest: at 300m a
- * patch sprawled far enough that two contributions placed a normal walk apart
- * overlapped, and the max-height stack turned them into one shapeless mass.
- * 180m keeps a mountain readable as *one* mountain.
+ * This is a balance between two failures. Too wide (300m) and contributions
+ * placed a normal walk apart overlap, and the max-height stack merges them
+ * into one shapeless mass. Too narrow (180m) and there is no room for a
+ * mountain to have a base: a 70m peak came out 14m across, a rock spire
+ * rather than a massif. At 260m, one brush dab lands at roughly 1:2
+ * height-to-width, which is about what a real hill does.
  */
-export const PATCH_SCALE = 180;
+export const PATCH_SCALE = 260;
 
 /**
  * Synthesis grid for a patch. Higher than the stored sketch (64) on purpose —
  * the sketch supplies the silhouette, and upsampling gives the fractal and
  * erosion passes room to put detail *between* the drawn cells. At 64 on a
- * 180m patch each cell is ~2.8m and the surface comes out a smooth dome;
- * at 128 it's ~1.4m, which is where ridges and gullies become visible.
+ * 260m patch each cell is ~4m and the surface comes out a smooth dome; at
+ * 128 it's ~2m, which is where ridges and gullies become visible.
  */
 export const SYNTH_GRID = 128;
 

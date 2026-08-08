@@ -12,7 +12,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { PointerLockControls, Sky, Stars } from '@react-three/drei';
+import { PointerLockControls } from '@react-three/drei';
 import { createClient } from '@supabase/supabase-js';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import * as THREE from 'three';
@@ -27,6 +27,8 @@ import {
   PATCH_SCALE,
   type BuiltPatch,
 } from './world/terrain';
+import { Weather, CONDITIONS } from './world/weather';
+import type { Contribution, WeatherPayload } from './world/contract';
 import {
   BROADCAST_MS,
   STALE_MS,
@@ -46,6 +48,22 @@ const EYE = 1.8;
 
 /** Window for the double-tap-Space flight toggle. Minecraft's is ~300ms. */
 const DOUBLE_TAP_MS = 300;
+
+/** Draw brush radius, in pixels of the 512 sketch canvas. See paint(). */
+const BRUSH_R = 130;
+
+/**
+ * Half-width of the playable world, in metres — so a 2000m square.
+ *
+ * Bounded rather than infinite on purpose: the whole world fits in one query
+ * with no chunk streaming, and contributions cluster instead of scattering,
+ * which is what makes the place read as populated. At 40m/s sprinting it is
+ * roughly a minute corner to corner — nobody finds the edge by accident.
+ */
+const WORLD_HALF = 1000;
+
+/** Ceiling on flight, so you can survey the world without leaving the fog. */
+const WORLD_CEIL = 600;
 
 interface Patch {
   id: string;
@@ -129,18 +147,17 @@ function groundAt(built: BuiltPatch[], wx: number, wz: number): number {
 
 /* ------------------------------------------------------------ the plain --- */
 
+/**
+ * The ground.
+ *
+ * Fixed in place rather than following the camera: the world is bounded now,
+ * and the walls stop you well before the rim is visible. Overshoots the bounds
+ * a little so the edge of the geometry never enters frame.
+ */
 function Plain() {
-  const { camera } = useThree();
-  const mesh = useRef<THREE.Mesh>(null);
-
-  // Follows the player so the world has no edge to walk off; fog hides the rim.
-  useFrame(() => {
-    if (mesh.current) mesh.current.position.set(camera.position.x, 0, camera.position.z);
-  });
-
   return (
-    <mesh ref={mesh} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-      <planeGeometry args={[3000, 3000]} />
+    <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+      <planeGeometry args={[WORLD_HALF * 2.4, WORLD_HALF * 2.4]} />
       <meshStandardMaterial color="#5f6a4d" roughness={0.97} />
     </mesh>
   );
@@ -183,12 +200,14 @@ function Walker({
   channel,
   selfId,
   onOpenDraw,
+  onOpenWeather,
   onFlyChange,
 }: {
   built: BuiltPatch[];
   channel: React.RefObject<RealtimeChannel | null>;
   selfId: string;
   onOpenDraw: (x: number, z: number) => void;
+  onOpenWeather: (x: number, z: number) => void;
   onFlyChange: (flying: boolean) => void;
 }) {
   const { camera } = useThree();
@@ -250,6 +269,10 @@ function Walker({
         e.preventDefault();
         onOpenDraw(camera.position.x, camera.position.z);
       }
+      if (e.code === 'KeyQ' && locked.current) {
+        e.preventDefault();
+        onOpenWeather(camera.position.x, camera.position.z);
+      }
     };
     const up = (e: KeyboardEvent) => set(e.code, false);
     const blur = clearKeys;
@@ -262,7 +285,7 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw, onFlyChange]);
+  }, [camera, onOpenDraw, onOpenWeather, onFlyChange]);
 
   useFrame((_, delta) => {
     const m = move.current;
@@ -287,14 +310,20 @@ function Walker({
       camera.position.add(dir.current);
     }
 
+    // Invisible walls. Clamped after the move rather than blocking it, so
+    // sliding along a wall still works instead of stopping you dead.
+    camera.position.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, camera.position.x));
+    camera.position.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, camera.position.z));
+
     const ground = groundAt(built, camera.position.x, camera.position.z) + EYE;
 
     if (fly) {
       // Space wins over Shift when both are held, rather than cancelling out.
       const lift = m.up ? 1 : m.down ? -1 : 0;
       if (lift) camera.position.y += lift * speed;
-      // Don't let flight bury the camera inside a mountain.
+      // Don't let flight bury the camera inside a mountain, or leave the fog.
       if (camera.position.y < ground) camera.position.y = ground;
+      if (camera.position.y > WORLD_CEIL) camera.position.y = WORLD_CEIL;
     } else {
       // Stick to whatever terrain is underfoot; lerped so a ridge is a fall.
       camera.position.y += (ground - camera.position.y) * Math.min(1, delta * 10);
@@ -327,14 +356,25 @@ function Walker({
 
 export default function World() {
   const [patches, setPatches] = useState<Patch[]>([]);
+  const [zones, setZones] = useState<Contribution<WeatherPayload>[]>([]);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
+  const [weatherAt, setWeatherAt] = useState<{ x: number; z: number } | null>(null);
   const [flying, setFlying] = useState(false);
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
   );
 
   const selfId = useMemo(makeSelfId, []);
+
+  // Particle budget. A judge's phone gets a much smaller buffer — the sky and
+  // fog carry most of the atmosphere anyway, and they cost the same either way.
+  const quality = useMemo(() => {
+    if (typeof navigator === 'undefined') return 1;
+    const coarse =
+      typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
+    return coarse || navigator.hardwareConcurrency <= 4 ? 0.35 : 1;
+  }, []);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const travellerMap = useRef<Map<string, Traveller>>(new Map());
 
@@ -363,6 +403,7 @@ export default function World() {
     let cancelled = false;
 
     const toPatch = (r: Record<string, unknown>): Patch | null => {
+      if (String(r.type) !== 'terrain') return null;
       const props = (r.properties ?? {}) as Record<string, unknown>;
       if (typeof props.sketch !== 'string') return null;
       return {
@@ -375,17 +416,55 @@ export default function World() {
       };
     };
 
+    // Weather rows live in the same table under type='weather'. The payload is
+    // three small numbers — there is no recipe to regenerate, because the
+    // "geometry" is a global shader state rather than a mesh.
+    const toZone = (r: Record<string, unknown>): Contribution<WeatherPayload> | null => {
+      if (String(r.type) !== 'weather') return null;
+      const props = (r.properties ?? {}) as Record<string, unknown>;
+      const condition = typeof props.condition === 'string' ? props.condition : null;
+      if (!condition) return null;
+      return {
+        id: String(r.id),
+        kind: 'weather',
+        x: Number(r.x) || 0,
+        z: Number(r.z) || 0,
+        rotation: 0,
+        author: String(r.author ?? ''),
+        created_at: String(r.created_at ?? ''),
+        payload: {
+          condition,
+          intensity: Number(props.intensity) || 0.7,
+          radius: Number(props.radius) || 220,
+        },
+      };
+    };
+
+    // One query for the whole world, split client-side. Two round trips to load
+    // a world that fits in one is a worse deal than filtering an array.
     supabase
       .from('world_assets')
       .select('*')
-      .eq('type', 'terrain')
+      .in('type', ['terrain', 'weather'])
       .then(({ data, error }) => {
         if (cancelled || error || !data) return;
+
         setPatches((prev) => {
           const byId = new Map(prev.map((p) => [p.id, p]));
           for (const row of data) {
-            const p = toPatch(row as Record<string, unknown>);
+            const r = row as Record<string, unknown>;
+            if (String(r.type) !== 'terrain') continue;
+            const p = toPatch(r);
             if (p) byId.set(p.id, p);
+          }
+          return [...byId.values()];
+        });
+
+        setZones((prev) => {
+          const byId = new Map(prev.map((z) => [z.id, z]));
+          for (const row of data) {
+            const z = toZone(row as Record<string, unknown>);
+            if (z) byId.set(z.id, z);
           }
           return [...byId.values()];
         });
@@ -397,7 +476,15 @@ export default function World() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'world_assets' },
         (payload) => {
-          const p = toPatch(payload.new as Record<string, unknown>);
+          const row = payload.new as Record<string, unknown>;
+
+          const z = toZone(row);
+          if (z) {
+            setZones((prev) => (prev.some((q) => q.id === z.id) ? prev : [...prev, z]));
+            return;
+          }
+
+          const p = toPatch(row);
           if (!p) return;
           setPatches((prev) => (prev.some((q) => q.id === p.id) ? prev : [...prev, p]));
         },
@@ -488,6 +575,71 @@ export default function World() {
     [],
   );
 
+  /* -------- contribute weather -------- */
+
+  const summonWeather = useCallback(
+    (condition: string, x: number, z: number, intensity = 0.85, radius = 260) => {
+      const tempId = `temp-w-${Math.floor(Math.random() * 1e9)}`;
+      const payload: WeatherPayload = { condition, intensity, radius };
+
+      // Optimistic, same as terrain: the sky changes the instant you press the
+      // key, and the write reconciles behind it.
+      const optimistic: Contribution<WeatherPayload> = {
+        id: tempId,
+        kind: 'weather',
+        x,
+        z,
+        rotation: 0,
+        author: selfId,
+        created_at: new Date().toISOString(),
+        payload,
+      };
+      setZones((prev) => [...prev, optimistic]);
+
+      if (!supabase) return;
+
+      supabase
+        .from('world_assets')
+        .insert({ x, z, type: 'weather', color: '#8fa3b5', properties: payload })
+        .select()
+        .then(({ data, error }) => {
+          setZones((prev) => {
+            const without = prev.filter((q) => q.id !== tempId);
+            if (error || !data?.length) return without; // roll back on failure
+            const id = String((data[0] as Record<string, unknown>).id);
+            return without.some((q) => q.id === id)
+              ? without
+              : [...without, { ...optimistic, id }];
+          });
+        });
+    },
+    [selfId],
+  );
+
+  /* -------- reset -------- */
+
+  /**
+   * Wipe the world. Dev-only escape hatch for clearing test contributions —
+   * this is the one operation that violates "nothing ever overwrites anything",
+   * which is why it asks first and why it should not survive to the demo.
+   */
+  const reset = useCallback(async () => {
+    if (!window.confirm('Delete every contribution in the world? This cannot be undone.')) return;
+
+    setPatches([]);
+    setZones([]);
+    cache.current.clear();
+
+    if (!supabase) return;
+    // Supabase requires a WHERE clause on delete; matching the types we own
+    // is both the filter and a guarantee we never touch another table's rows.
+    const { error } = await supabase
+      .from('world_assets')
+      .delete()
+      .in('type', ['terrain', 'weather']);
+    if (error) console.error('reset failed', error);
+  }, []);
+
   const label =
     status === 'live'
       ? `${travellers.length} traveller${travellers.length === 1 ? '' : 's'} nearby`
@@ -501,14 +653,11 @@ export default function World() {
         shadows
         dpr={[1, 2]}
         camera={{ position: [0, EYE, 40], fov: 72, near: 0.5, far: 3000 }}
-        onCreated={({ scene }) => {
-          scene.fog = new THREE.FogExp2('#b9c6d6', 0.0022);
-        }}
       >
-        <Sky sunPosition={[90, 25, -120]} turbidity={7} rayleigh={2.4} />
-        <Stars radius={500} depth={70} count={700} factor={4} fade />
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[120, 190, -70]} intensity={2.0} color="#fff3e2" castShadow />
+        {/* Sky, stars, sun, fog and precipitation — all of it. Mounted once,
+            as a sibling of the terrain rather than per-contribution, because
+            there is only ever one atmosphere. Owns scene.fog from here on. */}
+        <Weather zones={zones} quality={quality} />
 
         <Plain />
         {built.map((b) => (
@@ -524,15 +673,24 @@ export default function World() {
           channel={channelRef}
           selfId={selfId}
           onOpenDraw={(x, z) => setDrawAt({ x, z })}
+          onOpenWeather={(x, z) => setWeatherAt({ x, z })}
           onFlyChange={setFlying}
         />
       </Canvas>
 
-      <div className="pointer-events-none absolute left-6 top-6 rounded-lg bg-black/50 p-4 backdrop-blur">
+      <div className="absolute left-6 top-6 rounded-lg bg-black/50 p-4 backdrop-blur">
         <h1 className="text-lg font-semibold text-white">Infinite Terra</h1>
         <p className="mt-1 text-sm text-white/70">
           {patches.length} landform{patches.length === 1 ? '' : 's'} · {label}
         </p>
+        {/* Dev-only. Pull this before judging — a wipe button next to a shared
+            world is a great way to lose everyone's work mid-demo. */}
+        <button
+          onClick={reset}
+          className="mt-3 rounded-md border border-red-400/30 px-3 py-1 text-xs text-red-300/90 transition hover:bg-red-400/15"
+        >
+          Reset world
+        </button>
       </div>
 
       <div className="pointer-events-none absolute bottom-6 left-6 space-y-1 text-xs text-white/55">
@@ -547,7 +705,8 @@ export default function World() {
           )}
         </p>
         <p>
-          <span className="text-white/85">E</span> to raise mountains here ·{' '}
+          <span className="text-white/85">E</span> to raise mountains ·{' '}
+          <span className="text-white/85">Q</span> to summon weather ·{' '}
           <span className="text-white/85">Double-tap Space</span> to{' '}
           {flying ? 'land' : 'fly'} · <span className="text-white/85">Esc</span> to release
         </p>
@@ -564,6 +723,16 @@ export default function World() {
         <DrawPanel
           onCancel={() => setDrawAt(null)}
           onCommit={(grid, style) => commit(grid, drawAt.x, drawAt.z, style)}
+        />
+      )}
+
+      {weatherAt && (
+        <WeatherPanel
+          onCancel={() => setWeatherAt(null)}
+          onCommit={(condition, intensity, radius) => {
+            summonWeather(condition, weatherAt.x, weatherAt.z, intensity, radius);
+            setWeatherAt(null);
+          }}
         />
       )}
     </div>
@@ -601,12 +770,20 @@ function DrawPanel({
 
     // Soft wide brush: gradients give the heightmap slopes to work with,
     // where a hard 1px pen produces a wall.
-    const g = ctx.createRadialGradient(x, y, 0, x, y, 28);
-    g.addColorStop(0, 'rgba(0,0,0,0.9)');
+    //
+    // The radius is deliberately large relative to the canvas. At 28px one dab
+    // covered ~1% of the sketch, which came out a 70m peak only 14m across — a
+    // rock spire, not a mountain. Real massifs are wider than they are tall;
+    // at 130 a single dab lands near 1:2 height-to-width.
+    const g = ctx.createRadialGradient(x, y, 0, x, y, BRUSH_R);
+    // Soft shoulder rather than a linear ramp: holds the summit broad and
+    // lets the flanks fall away, instead of coming to a point.
+    g.addColorStop(0, 'rgba(0,0,0,0.85)');
+    g.addColorStop(0.45, 'rgba(0,0,0,0.5)');
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(x, y, 28, 0, Math.PI * 2);
+    ctx.arc(x, y, BRUSH_R, 0, Math.PI * 2);
     ctx.fill();
   }, []);
 
@@ -706,6 +883,106 @@ function DrawPanel({
             className="rounded-md bg-emerald-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-emerald-400"
           >
             Raise it
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------------------------------- weather panel --- */
+
+/**
+ * Pick a condition and how far it reaches.
+ *
+ * Deliberately lighter than the draw panel: weather is the one contribution
+ * that's felt rather than looked at, so the fast path matters more than the
+ * expressive one. Pick, commit, and the sky has already changed by the time
+ * the dialog closes.
+ */
+function WeatherPanel({
+  onCommit,
+  onCancel,
+}: {
+  onCommit: (condition: string, intensity: number, radius: number) => void;
+  onCancel: () => void;
+}) {
+  const [condition, setCondition] = useState('rain');
+  const [intensity, setIntensity] = useState(0.85);
+  const [radius, setRadius] = useState(260);
+
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm">
+      <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl border border-white/10 bg-neutral-900 p-6">
+        <h2 className="text-lg font-semibold text-white">Summon weather here</h2>
+        <p className="mt-1 text-sm text-white/60">
+          It blends with whatever else is nearby — nothing gets overwritten.
+        </p>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          {Object.values(CONDITIONS).map((c) => {
+            const active = c.name === condition;
+            const t = c.atmosphere.tint;
+            const swatch = `rgb(${Math.round(t[0] * 255)}, ${Math.round(t[1] * 255)}, ${Math.round(t[2] * 255)})`;
+            return (
+              <button
+                key={c.name}
+                onClick={() => setCondition(c.name)}
+                aria-pressed={active}
+                className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition ${
+                  active
+                    ? 'border-sky-400 bg-sky-400/15 text-white'
+                    : 'border-white/15 text-white/70 hover:bg-white/10'
+                }`}
+              >
+                <span
+                  className="h-3 w-3 rounded-full border border-black/30"
+                  style={{ background: swatch }}
+                />
+                {c.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <label className="mt-5 block text-xs font-medium tracking-wide text-white/50 uppercase">
+          Intensity · {Math.round(intensity * 100)}%
+        </label>
+        <input
+          type="range"
+          min={0.1}
+          max={1}
+          step={0.05}
+          value={intensity}
+          onChange={(e) => setIntensity(Number(e.target.value))}
+          className="mt-2 w-full accent-sky-400"
+        />
+
+        <label className="mt-4 block text-xs font-medium tracking-wide text-white/50 uppercase">
+          Reach · {radius}m
+        </label>
+        <input
+          type="range"
+          min={60}
+          max={800}
+          step={20}
+          value={radius}
+          onChange={(e) => setRadius(Number(e.target.value))}
+          className="mt-2 w-full accent-sky-400"
+        />
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            onClick={onCancel}
+            className="rounded-md border border-white/15 px-4 py-2 text-sm text-white/80 hover:bg-white/10"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onCommit(condition, intensity, radius)}
+            className="rounded-md bg-sky-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-sky-400"
+          >
+            Summon it
           </button>
         </div>
       </div>

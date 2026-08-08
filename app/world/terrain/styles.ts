@@ -61,7 +61,7 @@ export const STYLES: Record<string, TerrainStyle> = {
   default: {
     name: 'default',
     label: 'Highlands',
-    shape: { roughness: 0.72, ridged: 0.4, warp: 0.25, erosion: 2200, curve: 1.35, maxHeight: 70 },
+    shape: { roughness: 0.72, ridged: 0.4, warp: 0.25, erosion: 2200, curve: 1.05, maxHeight: 55 },
     palette: {
       low: '#6f6a4f',
       mid: '#3f6b4a',
@@ -76,11 +76,12 @@ export const STYLES: Record<string, TerrainStyle> = {
   icy: {
     name: 'icy',
     label: 'Icy Peaks',
-    // Sharp and tall: high ridged weight makes knife-edge aretes and high
-    // roughness keeps the faces broken. Erosion stays light — past a couple of
-    // thousand droplets it sands the aretes back into a dome. Low snowline
-    // puts white almost everywhere.
-    shape: { roughness: 0.85, ridged: 0.9, warp: 0.2, erosion: 3000, curve: 1.55, maxHeight: 95 },
+    // Sharp and tall: ridged weight makes knife-edge aretes, and erosion stays
+    // light because past a couple of thousand droplets it sands them back into
+    // a dome. Ridged and roughness are both held below the point where the
+    // detail starts shattering the massif into separate islands — that reads
+    // as scree, not a peak. Low snowline puts white almost everywhere.
+    shape: { roughness: 0.6, ridged: 0.62, warp: 0.2, erosion: 2600, curve: 1.15, maxHeight: 70 },
     palette: {
       low: '#5b6a78',
       mid: '#8fa3b5',
@@ -98,7 +99,7 @@ export const STYLES: Record<string, TerrainStyle> = {
     // Soft and low. Rounded (low ridged), gentle curve so it reads as rolling
     // hills you'd walk through, not climb. Pink accent is what the flora
     // pipeline reads to scatter blossom trees.
-    shape: { roughness: 0.4, ridged: 0.12, warp: 0.45, erosion: 1500, curve: 0.95, maxHeight: 42 },
+    shape: { roughness: 0.4, ridged: 0.12, warp: 0.45, erosion: 1500, curve: 0.9, maxHeight: 34 },
     palette: {
       low: '#8f7f6a',
       mid: '#7fa86a',
@@ -115,7 +116,7 @@ export const STYLES: Record<string, TerrainStyle> = {
     label: 'Volcanic',
     // Steep cones, minimal erosion (fresh basalt hasn't been carved yet),
     // hard curve so the flanks fall away fast. Glowing peak.
-    shape: { roughness: 0.68, ridged: 0.55, warp: 0.15, erosion: 1200, curve: 1.9, maxHeight: 88 },
+    shape: { roughness: 0.55, ridged: 0.45, warp: 0.15, erosion: 1200, curve: 1.35, maxHeight: 64 },
     palette: {
       low: '#3a3230',
       mid: '#2e2724',
@@ -132,7 +133,7 @@ export const STYLES: Record<string, TerrainStyle> = {
     label: 'Desert Mesa',
     // Flat tops: curve well below 1 gives plateaus, and near-zero erosion
     // keeps the mesa edges square instead of rounding them off.
-    shape: { roughness: 0.5, ridged: 0.2, warp: 0.6, erosion: 800, curve: 0.6, maxHeight: 55 },
+    shape: { roughness: 0.5, ridged: 0.2, warp: 0.6, erosion: 800, curve: 0.6, maxHeight: 44 },
     palette: {
       low: '#c9a227',
       mid: '#b5763a',
@@ -150,7 +151,7 @@ export const STYLES: Record<string, TerrainStyle> = {
     // The most eroded style, but still modest in absolute terms: enough
     // droplets to carve branching valleys into the flanks without flattening
     // the massif into a mound.
-    shape: { roughness: 0.6, ridged: 0.3, warp: 0.35, erosion: 4000, curve: 1.15, maxHeight: 60 },
+    shape: { roughness: 0.6, ridged: 0.3, warp: 0.35, erosion: 4000, curve: 1.0, maxHeight: 48 },
     palette: {
       low: '#4a6b3a',
       mid: '#2f5c34',
