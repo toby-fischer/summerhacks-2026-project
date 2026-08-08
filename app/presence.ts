@@ -48,8 +48,12 @@ export function joinTravellerChannel(
   supabase: SupabaseClient,
   selfId: string,
   onMove: (t: Traveller) => void,
+  /** Which world's travellers to listen to. See WORLD in World.tsx. */
+  world = 'main',
 ): RealtimeChannel {
-  const channel = supabase.channel('terra:travellers', {
+  // Per-world channel: without this you see wisps of people walking around a
+  // world whose terrain you aren't loading, drifting through empty air.
+  const channel = supabase.channel(`terra:travellers:${world}`, {
     // We render our own position locally; no need to echo it back to ourselves.
     config: { broadcast: { self: false } },
   });

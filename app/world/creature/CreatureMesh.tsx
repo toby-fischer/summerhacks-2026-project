@@ -5,17 +5,26 @@
 'use client';
 
 import { useEffect, useMemo } from 'react';
-import { decodeSketch } from '../terrain';
+import { decodeSketch, groundAt, type BuiltPatch } from '../terrain';
 import { buildCreatureGeometry, buildCreatureTexture } from './mesh';
 import type { Creature } from './types';
 
 export function CreatureMesh({
   creature,
-  groundY,
+  built,
 }: {
   creature: Creature;
-  groundY: number;
+  /** Every terrain patch. The creature finds its own footing in them. */
+  built: readonly BuiltPatch[];
 }) {
+  // Recomputed whenever the terrain list changes, not fixed at spawn time.
+  // In a shared world someone raises a mountain under a creature that is
+  // already standing there — with a one-shot height it stays at the old
+  // elevation and ends up buried in the hillside until a page reload.
+  const groundY = useMemo(
+    () => groundAt(built, creature.x, creature.z),
+    [built, creature.x, creature.z],
+  );
   // Both passes are pure functions of the stored sketches, so this runs once
   // per creature rather than per frame. Keyed on the sketches themselves and
   // not the row, so an id reconciling from temp to real doesn't rebuild it.

@@ -20,11 +20,10 @@ import * as THREE from 'three';
 import {
   buildPatch,
   encodeSketch,
-  heightAt,
+  groundAt,
   styleFor,
   STYLES,
   SKETCH_GRID,
-  PATCH_SCALE,
   type BuiltPatch,
 } from './world/terrain';
 import { Weather, CONDITIONS } from './world/weather';
@@ -45,6 +44,17 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 const supabase =
   supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+
+/**
+ * Which world this client reads and writes.
+ *
+ * One table, many worlds. Without this everyone developing against the same
+ * Supabase project shares one landscape, so a teammate testing locally drops
+ * mountains into the world you are about to demo. Set NEXT_PUBLIC_WORLD=dev in
+ * your own .env to work somewhere nobody is watching; the demo build leaves it
+ * unset and gets 'main'.
+ */
+const WORLD = process.env.NEXT_PUBLIC_WORLD || 'main';
 
 const EYE = 1.8;
 
@@ -130,21 +140,6 @@ function PatchMesh({ built }: { built: BuiltPatch }) {
       />
     </mesh>
   );
-}
-
-/** Max across overlapping patches, so contributions stack into ridges. */
-function groundAt(built: BuiltPatch[], wx: number, wz: number): number {
-  let h = 0;
-  for (const patch of built) {
-    const { terrain } = patch;
-    const lx = wx - patch.x;
-    const lz = wz - patch.z;
-    const half = terrain.scale / 2;
-    if (lx < -half || lx > half || lz < -half || lz > half) continue;
-    const v = heightAt(terrain, lx, lz);
-    if (v > h) h = v;
-  }
-  return h;
 }
 
 /* ------------------------------------------------------------ the plain --- */
@@ -503,6 +498,7 @@ export default function World() {
     supabase
       .from('world_assets')
       .select('*')
+      .eq('world', WORLD)
       .in('type', ['terrain', 'weather', 'creature'])
       .then(({ data, error }) => {
         if (cancelled || error || !data) return;
@@ -537,11 +533,19 @@ export default function World() {
         });
       });
 
+    // Channel name is per-world so two worlds don't share a subscription, and
+    // the postgres filter keeps another world's inserts off the wire entirely
+    // rather than fetching them and discarding them client-side.
     const channel = supabase
-      .channel('public:world_assets')
+      .channel(`world_assets:${WORLD}`)
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'world_assets' },
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'world_assets',
+          filter: `world=eq.${WORLD}`,
+        },
         (payload) => {
           const row = payload.new as Record<string, unknown>;
 
@@ -576,9 +580,14 @@ export default function World() {
   /* -------- presence -------- */
   useEffect(() => {
     if (!supabase) return;
-    const channel = joinTravellerChannel(supabase, selfId, (t) => {
-      travellerMap.current.set(t.id, t);
-    });
+    const channel = joinTravellerChannel(
+      supabase,
+      selfId,
+      (t) => {
+        travellerMap.current.set(t.id, t);
+      },
+      WORLD,
+    );
     channelRef.current = channel;
 
     // One timer drives eviction and re-render, so React updates at 5Hz rather
@@ -617,6 +626,7 @@ export default function World() {
         .insert({
           x,
           z,
+          world: WORLD,
           type: 'terrain',
           color: styleFor(style).palette.high,
           properties: { sketch, seed, style },
@@ -682,6 +692,7 @@ export default function World() {
         .insert({
           x,
           z,
+          world: WORLD,
           type: 'creature',
           color: '#d9c9a3',
           properties: { outlineSketch, patternSketch, rotation },
@@ -726,7 +737,7 @@ export default function World() {
 
       supabase
         .from('world_assets')
-        .insert({ x, z, type: 'weather', color: '#8fa3b5', properties: payload })
+        .insert({ x, z, world: WORLD, type: 'weather', color: '#8fa3b5', properties: payload })
         .select()
         .then(({ data, error }) => {
           setZones((prev) => {
@@ -745,26 +756,26 @@ export default function World() {
   /* -------- reset -------- */
 
   /**
-   * Wipe the world. Dev-only escape hatch for clearing test contributions —
-   * this is the one operation that violates "nothing ever overwrites anything",
-   * which is why it asks first and why it should not survive to the demo.
+   * Clear the world from this client's view.
+   *
+   * Local only. The database is append-only by policy now — RLS grants SELECT
+   * and INSERT and nothing else, so a DELETE from the publishable key is
+   * refused. That is deliberate: the key ships in the client bundle, and a
+   * working wipe button reachable from devtools is how you lose everyone's
+   * work mid-demo. To actually empty the table, use the Supabase dashboard,
+   * where you are the service role and RLS does not apply.
+   *
+   * Reloading brings everything straight back, which is the point — this is
+   * for decluttering your own view while testing, not for destroying anything.
    */
-  const reset = useCallback(async () => {
-    if (!window.confirm('Delete every contribution in the world? This cannot be undone.')) return;
-
+  const reset = useCallback(() => {
+    if (!window.confirm('Hide every contribution on this screen? Reload brings them back.')) {
+      return;
+    }
     setPatches([]);
     setZones([]);
     setCreatures([]);
     cache.current.clear();
-
-    if (!supabase) return;
-    // Supabase requires a WHERE clause on delete; matching the types we own
-    // is both the filter and a guarantee we never touch another table's rows.
-    const { error } = await supabase
-      .from('world_assets')
-      .delete()
-      .in('type', ['terrain', 'weather', 'creature']);
-    if (error) console.error('reset failed', error);
   }, []);
 
   // Flatten the weather rows to what the map needs. Memoized so the map's
@@ -806,7 +817,7 @@ export default function World() {
         ))}
 
         {creatures.map((c) => (
-          <CreatureMesh key={c.id} creature={c} groundY={groundAt(built, c.x, c.z)} />
+          <CreatureMesh key={c.id} creature={c} built={built} />
         ))}
 
         {travellers.map((t) => (
@@ -842,13 +853,13 @@ export default function World() {
           {patches.length} landform{patches.length === 1 ? '' : 's'} ·{' '}
           {creatures.length} creature{creatures.length === 1 ? '' : 's'} · {label}
         </p>
-        {/* Dev-only. Pull this before judging — a wipe button next to a shared
-            world is a great way to lose everyone's work mid-demo. */}
+        {/* Local-only now that the table is append-only, so this is safe to
+            leave in — it clears your screen, not the database. */}
         <button
           onClick={reset}
-          className="mt-3 rounded-md border border-red-400/30 px-3 py-1 text-xs text-red-300/90 transition hover:bg-red-400/15"
+          className="mt-3 rounded-md border border-white/15 px-3 py-1 text-xs text-white/60 transition hover:bg-white/10"
         >
-          Reset world
+          Clear my view
         </button>
       </div>
 

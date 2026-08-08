@@ -13,7 +13,7 @@
 // already final: heights match the mesh, colours match the heights, and
 // building twice is harmless.
 
-import { synthesize, slopeMap, type TerrainData } from './pipeline';
+import { synthesize, slopeMap, heightAt, type TerrainData } from './pipeline';
 import { decodeSketch, resample, SKETCH_GRID, SYNTH_GRID, PATCH_SCALE } from './sketch';
 import { shadeTerrain } from './shading';
 import { styleFor, optionsFor, type TerrainStyle } from './styles';
@@ -113,4 +113,30 @@ export function buildPatch(patch: PatchInput): BuiltPatch {
   const colors = shadeTerrain(terrain, style.palette, { seed: patch.seed });
 
   return { id: patch.id, x: patch.x, z: patch.z, terrain, colors, style };
+}
+
+/**
+ * Ground height at a world position: the max across every overlapping patch.
+ *
+ * Max rather than sum, per the contract's additive law — overlapping
+ * contributions stack into one ridge instead of doubling into a spike, and
+ * nobody's landform can be flattened by someone building next to it.
+ *
+ * Lives here rather than in the renderer because everything that sits ON the
+ * ground needs it — the walker, creatures, and whatever pipeline lands next.
+ * Two implementations of this would eventually disagree, and the symptom would
+ * be things sunk into hillsides.
+ */
+export function groundAt(built: readonly BuiltPatch[], wx: number, wz: number): number {
+  let h = 0;
+  for (const patch of built) {
+    const { terrain } = patch;
+    const lx = wx - patch.x;
+    const lz = wz - patch.z;
+    const half = terrain.scale / 2;
+    if (lx < -half || lx > half || lz < -half || lz > half) continue;
+    const v = heightAt(terrain, lx, lz);
+    if (v > h) h = v;
+  }
+  return h;
 }

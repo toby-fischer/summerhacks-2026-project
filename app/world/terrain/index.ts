@@ -34,4 +34,4 @@ export { shadeTerrain, type ShadeOptions } from './shading';
 
 export { encodeSketch, decodeSketch, SKETCH_GRID, PATCH_SCALE } from './sketch';
 
-export { buildPatch, type PatchInput, type BuiltPatch } from './build';
+export { buildPatch, groundAt, type PatchInput, type BuiltPatch } from './build';
