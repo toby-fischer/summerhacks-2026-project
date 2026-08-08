@@ -177,13 +177,15 @@ function Plain() {
 function Wisp({ traveller }: { traveller: Traveller }) {
   const group = useRef<THREE.Group>(null);
   const target = useRef(new THREE.Vector3(traveller.x, 0, traveller.z));
+  const elapsedTime = useRef(0);
 
-  // Broadcasts land at ~10Hz; interpolating turns discrete hops into motion.
   useFrame((state, delta) => {
     if (!group.current) return;
+    elapsedTime.current += delta;
+    
     target.current.set(traveller.x, traveller.y ?? 0, traveller.z);
     group.current.position.lerp(target.current, 1 - Math.pow(0.002, delta));
-    group.current.position.y += Math.sin(state.clock.elapsedTime * 2) * 0.05;
+    group.current.position.y += Math.sin(elapsedTime.current * 2) * 0.05;
   });
 
   return (
@@ -279,6 +281,7 @@ function Walker({
         z: camera.position.z,
         a: camera.rotation.y,
         color: colorForId(selfId),
+        seen: now,
       });
     }
   });
@@ -445,13 +448,13 @@ export default function World() {
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
-      <Canvas
-        shadows
-        dpr={[1, 2]}
-        camera={{ position: [0, EYE, 40], fov: 72, near: 0.5, far: 3000 }}
-        onCreated={({ scene }) => {
-          scene.fog = new THREE.FogExp2('#b9c6d6', 0.0022);
-        }}
+    <Canvas
+      shadows={{ type: THREE.PCFShadowMap }} // Explicitly set to PCFShadowMap
+      dpr={[1, 2]}
+      camera={{ position: [0, EYE, 40], fov: 72, near: 0.5, far: 3000 }}
+      onCreated={({ scene }) => {
+        scene.fog = new THREE.FogExp2('#b9c6d6', 0.0022);
+      }}
       >
         <Sky sunPosition={[90, 25, -120]} turbidity={7} rayleigh={2.4} />
         <Stars radius={500} depth={70} count={700} factor={4} fade />

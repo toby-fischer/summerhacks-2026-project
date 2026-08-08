@@ -74,6 +74,13 @@ export function joinTravellerChannel(
   return channel;
 }
 
-export function sendMove(channel: RealtimeChannel, t: Omit<Traveller, 'seen'>) {
-  channel.send({ type: 'broadcast', event: 'move', payload: t });
+export function sendMove(channel: RealtimeChannel, data: Traveller) {
+  // Only broadcast over WebSocket once connected; skip REST fallback during connection
+  if (channel.state === 'joined') {
+    channel.send({
+      type: 'broadcast',
+      event: 'move',
+      payload: data,
+    });
+  }
 }
