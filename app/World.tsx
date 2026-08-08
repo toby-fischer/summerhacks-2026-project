@@ -78,7 +78,7 @@ interface AnimalData {
 
 /* ------------------------------------------------------------ encoding --- */
 
-function encodeSketch(grid: Float32Array<ArrayBuffer>): string {
+function encodeSketch(grid: Float32Array): string {
   const bytes = new Uint8Array(grid.length);
   for (let i = 0; i < grid.length; i++) {
     bytes[i] = Math.max(0, Math.min(255, Math.round(grid[i] * 255)));
@@ -88,11 +88,24 @@ function encodeSketch(grid: Float32Array<ArrayBuffer>): string {
   return btoa(s);
 }
 
-function decodeSketch(b64: string): Float32Array<ArrayBuffer> {
+function decodeSketch(b64: string): Float32Array {
   const bin = atob(b64);
   const out = new Float32Array(SKETCH_GRID * SKETCH_GRID);
   const n = Math.min(bin.length, out.length);
   for (let i = 0; i < n; i++) out[i] = bin.charCodeAt(i) / 255;
+  return out;
+}
+
+function encodeColorSketch(grid: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < grid.length; i++) s += String.fromCharCode(grid[i]);
+  return btoa(s);
+}
+
+function decodeColorSketch(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
 
@@ -191,18 +204,59 @@ function AnimalMesh({
   groundY: number;
 }) {
   const { geometry, texture, height } = useMemo(() => {
-    const outlineGrid = decodeSketch(animal.outlineSketch);
-    const patternGrid = decodeSketch(animal.patternSketch);
+    const rawOutline = decodeColorSketch(animal.outlineSketch);
+    const patternColorGrid = decodeColorSketch(animal.patternSketch);
 
-    // 1. Generate 3D Shape by extruding the outline grid
-    const shape = new THREE.Shape();
-    let started = false;
+    const isPixelPainted = (grid: Uint8Array, idx: number) => {
+      if (grid.length !== SKETCH_GRID * SKETCH_GRID * 4) return false;
+      const r = grid[idx];
+      const g = grid[idx + 1];
+      const b = grid[idx + 2];
+      const a = grid[idx + 3];
+      return a > 50 && (r < 245 || g < 245 || b < 245);
+    };
 
-    // Extract contour points from grid
-    const threshold = 0.15;
+    // Extract average color from the outline sketch
+    let outlineR = 255;
+    let outlineG = 255;
+    let outlineB = 255;
+    let paintedCount = 0;
+    let sumR = 0;
+    let sumG = 0;
+    let sumB = 0;
+
+    if (rawOutline.length === SKETCH_GRID * SKETCH_GRID * 4) {
+      for (let i = 0; i < SKETCH_GRID * SKETCH_GRID * 4; i += 4) {
+        if (isPixelPainted(rawOutline, i)) {
+          sumR += rawOutline[i];
+          sumG += rawOutline[i + 1];
+          sumB += rawOutline[i + 2];
+          paintedCount++;
+        }
+      }
+      if (paintedCount > 0) {
+        outlineR = Math.round(sumR / paintedCount);
+        outlineG = Math.round(sumG / paintedCount);
+        outlineB = Math.round(sumB / paintedCount);
+      }
+    }
+
+    // 1. Build solid 3D mask combining both outline and pattern strokes
     const solidGrid = new Uint8Array(SKETCH_GRID * SKETCH_GRID);
-    for (let i = 0; i < outlineGrid.length; i++) {
-      if (outlineGrid[i] > threshold) solidGrid[i] = 1;
+
+    if (rawOutline.length === SKETCH_GRID * SKETCH_GRID * 4 || patternColorGrid.length === SKETCH_GRID * SKETCH_GRID * 4) {
+      for (let i = 0; i < SKETCH_GRID * SKETCH_GRID; i++) {
+        const idx = i * 4;
+        if (isPixelPainted(rawOutline, idx) || isPixelPainted(patternColorGrid, idx)) {
+          solidGrid[i] = 1;
+        }
+      }
+    } else {
+      // Legacy float outline fallback
+      const legacyOutline = decodeSketch(animal.outlineSketch);
+      for (let i = 0; i < legacyOutline.length; i++) {
+        if (legacyOutline[i] > 0.15) solidGrid[i] = 1;
+      }
     }
 
     const outside = new Uint8Array(SKETCH_GRID * SKETCH_GRID);
@@ -312,7 +366,7 @@ function AnimalMesh({
           addQuad(
             [x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0],
             [-1, 0, 0],
-            [0, vMin], [1, vMin], [1, vMax], [0, vMax],
+            [uMin, vMin], [uMin, vMin], [uMin, vMax], [uMin, vMax],
           );
         }
 
@@ -321,7 +375,7 @@ function AnimalMesh({
           addQuad(
             [x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1],
             [1, 0, 0],
-            [0, vMin], [1, vMin], [1, vMax], [0, vMax],
+            [uMax, vMin], [uMax, vMin], [uMax, vMax], [uMax, vMax],
           );
         }
 
@@ -330,7 +384,7 @@ function AnimalMesh({
           addQuad(
             [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0],
             [0, 1, 0],
-            [uMin, 0], [uMax, 0], [uMax, 1], [uMin, 1],
+            [uMin, vMax], [uMax, vMax], [uMax, vMax], [uMin, vMax],
           );
         }
 
@@ -339,7 +393,7 @@ function AnimalMesh({
           addQuad(
             [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1],
             [0, -1, 0],
-            [uMin, 0], [uMax, 0], [uMax, 1], [uMin, 1],
+            [uMin, vMin], [uMax, vMin], [uMax, vMin], [uMin, vMin],
           );
         }
       }
@@ -360,30 +414,49 @@ function AnimalMesh({
       if (geom.boundingBox) {
         meshHeight = geom.boundingBox.max.y - geom.boundingBox.min.y;
       }
-    geom.center();
+      geom.center();
     }
 
-    // 2. Build canvas texture from pattern grid
+    // 3. Composite canvas texture (Pattern over Outline over Base Outline Color)
     const canvas = document.createElement('canvas');
     canvas.width = SKETCH_GRID;
     canvas.height = SKETCH_GRID;
     const ctx = canvas.getContext('2d')!;
-
     const imgData = ctx.createImageData(SKETCH_GRID, SKETCH_GRID);
-    for (let i = 0; i < patternGrid.length; i++) {
-      const val = patternGrid[i];
-      const idx = i * 4;
-      imgData.data[idx] = Math.round((1 - val) * 240); // Base skin color light
-      imgData.data[idx + 1] = Math.round((1 - val) * 220);
-      imgData.data[idx + 2] = Math.round((1 - val) * 200);
-      imgData.data[idx + 3] = 255;
+
+    for (let i = 0; i < SKETCH_GRID * SKETCH_GRID * 4; i += 4) {
+      const pixelIdx = i / 4;
+      const x = pixelIdx % SKETCH_GRID;
+      const y = Math.floor(pixelIdx / SKETCH_GRID);
+
+      const patternPainted = isPixelPainted(patternColorGrid, i);
+      const outlinePainted = isPixelPainted(rawOutline, i);
+
+      if (patternPainted) {
+        imgData.data[i] = patternColorGrid[i];
+        imgData.data[i + 1] = patternColorGrid[i + 1];
+        imgData.data[i + 2] = patternColorGrid[i + 2];
+        imgData.data[i + 3] = patternColorGrid[i + 3];
+      } else if (outlinePainted) {
+        imgData.data[i] = rawOutline[i];
+        imgData.data[i + 1] = rawOutline[i + 1];
+        imgData.data[i + 2] = rawOutline[i + 2];
+        imgData.data[i + 3] = rawOutline[i + 3];
+      } else {
+        // Fill remaining solid body pixels with the extracted outline stroke color
+        imgData.data[i] = outlineR;
+        imgData.data[i + 1] = outlineG;
+        imgData.data[i + 2] = outlineB;
+        imgData.data[i + 3] = isSolid(x, y) ? 255 : 0;
+      }
     }
+
     ctx.putImageData(imgData, 0, 0);
 
     const tex = new THREE.CanvasTexture(canvas);
-    tex.wrapS = THREE.RepeatWrapping;
-    tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(4, 4);
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.repeat.set(1, 1);
     tex.magFilter = THREE.NearestFilter;
     tex.needsUpdate = true;
 
@@ -705,7 +778,7 @@ export default function World() {
 
   /* -------- contribute terrain -------- */
   const commit = useCallback(
-    (grid: Float32Array<ArrayBuffer>, x: number, z: number) => {
+    (grid: Float32Array, x: number, z: number) => {
       const sketch = encodeSketch(grid);
       const seed = Math.floor(Math.random() * 1e9);
       const tempId = `temp-${seed}`;
@@ -740,9 +813,14 @@ export default function World() {
 
   /* -------- contribute animal -------- */
   const commitAnimal = useCallback(
-    (outlineGrid: Float32Array<ArrayBuffer>, patternGrid: Float32Array<ArrayBuffer>, x: number, z: number) => {
-      const outlineSketch = encodeSketch(outlineGrid);
-      const patternSketch = encodeSketch(patternGrid);
+    (
+      outlineGrid: Uint8Array,
+      patternGrid: Uint8Array,
+      x: number,
+      z: number,
+    ) => {
+      const outlineSketch = encodeColorSketch(outlineGrid);
+      const patternSketch = encodeColorSketch(patternGrid);
       const tempId = `temp-animal-${Math.random() * 1e9}`;
 
       setAnimals((prev) => [...prev, { id: tempId, x, z, outlineSketch, patternSketch }]);
@@ -861,7 +939,7 @@ export function DrawPanel({
   onCommit,
   onCancel,
 }: {
-  onCommit: (grid: Float32Array<ArrayBuffer>) => void;
+  onCommit: (grid: Float32Array) => void;
   onCancel: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1041,13 +1119,13 @@ export function AnimalDrawPanel({
   onCancel,
 }: {
   onCommit: (
-    outlineGrid: Float32Array<ArrayBuffer>,
-    patternGrid: Float32Array<ArrayBuffer>,
+    outlineGrid: Uint8Array,
+    patternGrid: Uint8Array,
   ) => void;
   onCancel: () => void;
 }) {
   const [step, setStep] = useState<'outline' | 'pattern'>('outline');
-  const [outlineGrid, setOutlineGrid] = useState<Float32Array<ArrayBuffer> | null>(null);
+  const [outlineGrid, setOutlineGrid] = useState<Uint8Array | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
@@ -1056,13 +1134,13 @@ export function AnimalDrawPanel({
   const [color, setColor] = useState('#000000');
   const [markerSize, setMarkerSize] = useState(14);
 
-  // Reset/Clear canvas when stepping between outline and pattern
+  // Initialize canvas background to white on mount only
   useEffect(() => {
     const ctx = canvasRef.current?.getContext('2d');
     if (!ctx) return;
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, 512, 512);
-  }, [step]);
+  }, []); // Keep empty array so step transition doesn't wipe canvas
 
   const getCanvasCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const c = canvasRef.current;
@@ -1115,43 +1193,55 @@ export function AnimalDrawPanel({
     lastPos.current = null;
   };
 
-  const captureGrid = useCallback(() => {
+  const captureColorGrid = useCallback(() => {
     const c = canvasRef.current;
     const ctx = c?.getContext('2d');
-    if (!c || !ctx) return new Float32Array(SKETCH_GRID * SKETCH_GRID);
-    const img = ctx.getImageData(0, 0, c.width, c.height);
+    if (!c || !ctx) return new Uint8Array(SKETCH_GRID * SKETCH_GRID * 4);
 
-    const grid = new Float32Array(SKETCH_GRID * SKETCH_GRID);
+    const img = ctx.getImageData(0, 0, c.width, c.height);
+    const colorGrid = new Uint8Array(SKETCH_GRID * SKETCH_GRID * 4);
     const pixelStep = c.width / SKETCH_GRID;
+
     for (let gy = 0; gy < SKETCH_GRID; gy++) {
       for (let gx = 0; gx < SKETCH_GRID; gx++) {
-        let acc = 0;
-        let n = 0;
+        let rAcc = 0;
+        let gAcc = 0;
+        let bAcc = 0;
+        let aAcc = 0;
+        let count = 0;
+
         for (let y = Math.floor(gy * pixelStep); y < Math.floor((gy + 1) * pixelStep); y++) {
           for (let x = Math.floor(gx * pixelStep); x < Math.floor((gx + 1) * pixelStep); x++) {
             const i = (y * c.width + x) * 4;
-            const lum =
-              (0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2]) / 255;
-            acc += 1 - lum;
-            n++;
+            rAcc += img.data[i];
+            gAcc += img.data[i + 1];
+            bAcc += img.data[i + 2];
+            aAcc += img.data[i + 3];
+            count++;
           }
         }
-        grid[gy * SKETCH_GRID + gx] = n ? acc / n : 0;
+
+        const outIdx = (gy * SKETCH_GRID + gx) * 4;
+        colorGrid[outIdx] = count ? Math.round(rAcc / count) : 255;
+        colorGrid[outIdx + 1] = count ? Math.round(gAcc / count) : 255;
+        colorGrid[outIdx + 2] = count ? Math.round(bAcc / count) : 255;
+        colorGrid[outIdx + 3] = count ? Math.round(aAcc / count) : 255;
       }
     }
-    return grid;
+
+    return colorGrid;
   }, []);
 
   const handleNext = () => {
-    const grid = captureGrid();
+    const grid = captureColorGrid();
     setOutlineGrid(grid);
     setStep('pattern');
-    setMarkerSize(20); // Default to slightly larger marker for pattern stage
+    setMarkerSize(20);
   };
 
   const handleDone = () => {
     if (!outlineGrid) return;
-    const patternGrid = captureGrid();
+    const patternGrid = captureColorGrid();
     onCommit(outlineGrid, patternGrid);
   };
 

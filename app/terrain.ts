@@ -254,7 +254,7 @@ function countPeaks(h: Float32Array<ArrayBuffer>, size: number): number {
  * add fractal detail *scaled by elevation* (peaks are rugged, valleys are
  * gentle — flat detail everywhere looks like noise), then erode.
  */
-export function synthesize(sketch: Float32Array<ArrayBuffer>, opts: TerrainOptions = {}): TerrainData {
+export function synthesize(sketch: Float32Array<ArrayBufferLike>, opts: TerrainOptions = {}): TerrainData {
   const size = opts.size ?? 128;
   const scale = opts.scale ?? 500;
   const maxHeight = opts.maxHeight ?? 70;
