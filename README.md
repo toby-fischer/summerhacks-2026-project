@@ -12,8 +12,10 @@ npm run dev
 Open **http://localhost:3000**
 
 - **Click** to capture the mouse, **WASD** to walk, **Shift** to run, **Esc** to release
-- **E** opens the sketch panel — draw a ridgeline, hit **Raise it**
-- Mountains rise where you're standing, and appear for everyone else in realtime
+- **E** opens the sketch panel:
+  - **Terrain mode**: draw a ridgeline, hit **Raise it**
+  - **Building mode**: draw a 2D building mass, hit **Build it**
+- Mountains or buildings appear where you're standing, and sync to everyone in realtime
 - Other people online show up as glowing wisps
 
 Needs Supabase credentials in `.env` (see [`.env.example`](.env.example)). Without them the world still runs — you just lose the shared layer.
@@ -49,5 +51,15 @@ Terrain rows live in `world_assets` with `type='terrain'`:
 | `x`, `z` | where the massif sits |
 | `properties.sketch` | base64 of the 64×64 grid |
 | `properties.seed` | so erosion is reproducible |
+
+Building rows use `type='building'`:
+
+| column | |
+|---|---|
+| `x`, `z` | where the building sits |
+| `properties.width` | world-space width in meters |
+| `properties.depth` | world-space depth in meters |
+| `properties.height` | world-space height in meters |
+| `properties.coverage`, `properties.meanInk` | sketch metrics for tuning |
 
 `terrain.ts` imports nothing — it's testable on its own and reusable anywhere.
