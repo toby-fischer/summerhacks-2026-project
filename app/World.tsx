@@ -17,7 +17,16 @@ import { createClient } from '@supabase/supabase-js';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import * as THREE from 'three';
 
-import { heightAt, synthesize, type TerrainData } from './terrain';
+import {
+  buildPatch,
+  encodeSketch,
+  heightAt,
+  styleFor,
+  STYLES,
+  SKETCH_GRID,
+  PATCH_SCALE,
+  type BuiltPatch,
+} from './world/terrain';
 import {
   BROADCAST_MS,
   STALE_MS,
@@ -33,11 +42,6 @@ const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 const supabase =
   supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
-/** Sketch resolution as stored. Small enough for jsonb, enough for landform. */
-const SKETCH_GRID = 64;
-/** Footprint of one contributed massif, in metres. */
-const PATCH_SCALE = 300;
-const PATCH_MAX_H = 60;
 const EYE = 1.8;
 
 interface Patch {
@@ -46,43 +50,23 @@ interface Patch {
   z: number;
   sketch: string;
   seed: number;
-}
-
-/* ------------------------------------------------------------ encoding --- */
-
-function encodeSketch(grid: Float32Array<ArrayBuffer>): string {
-  const bytes = new Uint8Array(grid.length);
-  for (let i = 0; i < grid.length; i++) {
-    bytes[i] = Math.max(0, Math.min(255, Math.round(grid[i] * 255)));
-  }
-  let s = '';
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-  return btoa(s);
-}
-
-function decodeSketch(b64: string): Float32Array<ArrayBuffer> {
-  const bin = atob(b64);
-  const out = new Float32Array(SKETCH_GRID * SKETCH_GRID);
-  const n = Math.min(bin.length, out.length);
-  for (let i = 0; i < n; i++) out[i] = bin.charCodeAt(i) / 255;
-  return out;
-}
-
-function terrainFor(p: Patch): TerrainData {
-  return synthesize(decodeSketch(p.sketch), {
-    size: SKETCH_GRID,
-    scale: PATCH_SCALE,
-    maxHeight: PATCH_MAX_H,
-    seed: p.seed,
-    // Lighter than the full-page demo: patches are smaller and several may
-    // synthesize at once when a new visitor loads the world.
-    erosion: 5000,
-  });
+  /** Named style from the picker or the text agent: "icy", "blossom"… */
+  style?: string;
 }
 
 /* -------------------------------------------------------------- terrain --- */
 
-function PatchMesh({ patch, terrain }: { patch: Patch; terrain: TerrainData }) {
+/**
+ * A contributed massif.
+ *
+ * Heights and colours arrive already finished from buildPatch — the rim
+ * falloff is baked in and the shading is style-driven. All this does is push
+ * them into a BufferGeometry, so it is safe to re-run and it can never
+ * disagree with what heightAt() reports underfoot.
+ */
+function PatchMesh({ built }: { built: BuiltPatch }) {
+  const { terrain, colors, style } = built;
+
   const geometry = useMemo(() => {
     const g = new THREE.PlaneGeometry(
       terrain.scale,
@@ -93,56 +77,43 @@ function PatchMesh({ patch, terrain }: { patch: Patch; terrain: TerrainData }) {
     g.rotateX(-Math.PI / 2);
 
     const pos = g.attributes.position as THREE.BufferAttribute;
-    const colors = new Float32Array(pos.count * 3);
-
-    const sand = new THREE.Color('#6f6a4f');
-    const grass = new THREE.Color('#3f6b4a');
-    const rock = new THREE.Color('#6b7a8f');
-    const snow = new THREE.Color('#e8eef7');
-    const c = new THREE.Color();
-
-    const half = terrain.scale / 2;
     for (let i = 0; i < pos.count; i++) {
-      // Feather the rim to zero so a patch blends into the plain instead of
-      // ending on a 60m cliff.
-      const edge = Math.max(Math.abs(pos.getX(i)), Math.abs(pos.getZ(i))) / half;
-      const falloff = 1 - THREE.MathUtils.smoothstep(edge, 0.6, 1);
-
-      const h = (terrain.heights[i] ?? 0) * falloff;
-      pos.setY(i, h);
-      terrain.heights[i] = h; // keep heightAt() consistent with the mesh
-
-      const t = h / terrain.maxHeight;
-      if (t < 0.12) c.copy(sand).lerp(grass, t / 0.12);
-      else if (t < 0.45) c.copy(grass).lerp(rock, (t - 0.12) / 0.33);
-      else if (t < 0.75) c.copy(rock);
-      else c.copy(rock).lerp(snow, (t - 0.75) / 0.25);
-
-      colors[i * 3] = c.r;
-      colors[i * 3 + 1] = c.g;
-      colors[i * 3 + 2] = c.b;
+      pos.setY(i, terrain.heights[i] ?? 0);
     }
+    pos.needsUpdate = true;
 
     g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     g.computeVertexNormals();
     return g;
-  }, [terrain]);
+  }, [terrain, colors]);
+
+  // Dispose on unmount — with hundreds of contributions, leaked geometries are
+  // what eventually kills the framerate on a phone.
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  // Volcanic peaks glow; everything else is plain rock. Smooth shading on the
+  // soft styles, faceted on the sharp ones.
+  const isVolcanic = style.name === 'volcanic';
 
   return (
-    <mesh geometry={geometry} position={[patch.x, 0, patch.z]} receiveShadow castShadow>
-      <meshStandardMaterial vertexColors roughness={0.93} metalness={0} flatShading />
+    <mesh geometry={geometry} position={[built.x, 0, built.z]} receiveShadow castShadow>
+      <meshStandardMaterial
+        vertexColors
+        roughness={style.name === 'icy' ? 0.55 : 0.93}
+        metalness={0}
+        flatShading={style.shape.ridged > 0.4}
+        emissive={isVolcanic ? new THREE.Color('#ff4a10') : undefined}
+        emissiveIntensity={isVolcanic ? 0.35 : 0}
+      />
     </mesh>
   );
 }
 
 /** Max across overlapping patches, so contributions stack into ridges. */
-function groundAt(
-  built: { patch: Patch; terrain: TerrainData }[],
-  wx: number,
-  wz: number,
-): number {
+function groundAt(built: BuiltPatch[], wx: number, wz: number): number {
   let h = 0;
-  for (const { patch, terrain } of built) {
+  for (const patch of built) {
+    const { terrain } = patch;
     const lx = wx - patch.x;
     const lz = wz - patch.z;
     const half = terrain.scale / 2;
@@ -210,7 +181,7 @@ function Walker({
   selfId,
   onOpenDraw,
 }: {
-  built: { patch: Patch; terrain: TerrainData }[];
+  built: BuiltPatch[];
   channel: React.RefObject<RealtimeChannel | null>;
   selfId: string;
   onOpenDraw: (x: number, z: number) => void;
@@ -306,16 +277,19 @@ export default function World() {
 
   // Synthesis is the expensive step, so it happens once per patch and is
   // cached by id — not on every render or frame.
-  const cache = useRef<Map<string, TerrainData>>(new Map());
+  const cache = useRef<Map<string, BuiltPatch>>(new Map());
   const built = useMemo(
     () =>
       patches.map((patch) => {
-        let terrain = cache.current.get(patch.id);
-        if (!terrain) {
-          terrain = terrainFor(patch);
-          cache.current.set(patch.id, terrain);
+        // Key on style too: re-styling a patch must rebuild it, and a stale
+        // entry would otherwise show the old palette forever.
+        const key = `${patch.id}:${patch.style ?? 'default'}`;
+        let b = cache.current.get(key);
+        if (!b) {
+          b = buildPatch(patch);
+          cache.current.set(key, b);
         }
-        return { patch, terrain };
+        return b;
       }),
     [patches],
   );
@@ -334,6 +308,7 @@ export default function World() {
         z: Number(r.z) || 0,
         sketch: props.sketch,
         seed: Number(props.seed) || 1337,
+        style: typeof props.style === 'string' ? props.style : undefined,
       };
     };
 
@@ -402,21 +377,27 @@ export default function World() {
 
   /* -------- contribute -------- */
   const commit = useCallback(
-    (grid: Float32Array<ArrayBuffer>, x: number, z: number) => {
+    (grid: Float32Array<ArrayBuffer>, x: number, z: number, style?: string) => {
       const sketch = encodeSketch(grid);
       const seed = Math.floor(Math.random() * 1e9);
       const tempId = `temp-${seed}`;
 
       // Optimistic: the terrain is under your feet immediately, and the write
       // reconciles behind it.
-      setPatches((prev) => [...prev, { id: tempId, x, z, sketch, seed }]);
+      setPatches((prev) => [...prev, { id: tempId, x, z, sketch, seed, style }]);
       setDrawAt(null);
 
       if (!supabase) return;
 
       supabase
         .from('world_assets')
-        .insert({ x, z, type: 'terrain', color: '#8fa8c8', properties: { sketch, seed } })
+        .insert({
+          x,
+          z,
+          type: 'terrain',
+          color: styleFor(style).palette.high,
+          properties: { sketch, seed, style },
+        })
         .select()
         .then(({ data, error }) => {
           setPatches((prev) => {
@@ -424,11 +405,20 @@ export default function World() {
             if (error || !data?.length) return without; // roll back on failure
             const row = data[0] as Record<string, unknown>;
             const id = String(row.id);
-            cache.current.set(id, cache.current.get(tempId) ?? terrainFor({ id, x, z, sketch, seed }));
-            cache.current.delete(tempId);
+
+            // Hand the already-synthesized patch to its real id so the insert
+            // doesn't cost a second synthesize.
+            const tempKey = `${tempId}:${style ?? 'default'}`;
+            const realKey = `${id}:${style ?? 'default'}`;
+            const existing = cache.current.get(tempKey);
+            if (existing) {
+              cache.current.set(realKey, { ...existing, id });
+              cache.current.delete(tempKey);
+            }
+
             return without.some((p) => p.id === id)
               ? without
-              : [...without, { id, x, z, sketch, seed }];
+              : [...without, { id, x, z, sketch, seed, style }];
           });
         });
     },
@@ -458,8 +448,8 @@ export default function World() {
         <directionalLight position={[120, 190, -70]} intensity={2.0} color="#fff3e2" castShadow />
 
         <Plain />
-        {built.map(({ patch, terrain }) => (
-          <PatchMesh key={patch.id} patch={patch} terrain={terrain} />
+        {built.map((b) => (
+          <PatchMesh key={b.id} built={b} />
         ))}
 
         {travellers.map((t) => (
@@ -496,7 +486,7 @@ export default function World() {
       {drawAt && (
         <DrawPanel
           onCancel={() => setDrawAt(null)}
-          onCommit={(grid) => commit(grid, drawAt.x, drawAt.z)}
+          onCommit={(grid, style) => commit(grid, drawAt.x, drawAt.z, style)}
         />
       )}
     </div>
@@ -509,11 +499,12 @@ function DrawPanel({
   onCommit,
   onCancel,
 }: {
-  onCommit: (grid: Float32Array<ArrayBuffer>) => void;
+  onCommit: (grid: Float32Array<ArrayBuffer>, style: string) => void;
   onCancel: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
+  const [style, setStyle] = useState('default');
 
   useEffect(() => {
     const ctx = canvasRef.current?.getContext('2d');
@@ -567,8 +558,8 @@ function DrawPanel({
         grid[gy * SKETCH_GRID + gx] = n ? acc / n : 0;
       }
     }
-    onCommit(grid);
-  }, [onCommit]);
+    onCommit(grid, style);
+  }, [onCommit, style]);
 
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm">
@@ -591,6 +582,37 @@ function DrawPanel({
           onPointerLeave={() => (drawing.current = false)}
           className="mt-4 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
         />
+
+        {/* Style picker. Each swatch previews its own palette, so the choice
+            is legible without having to raise the terrain first. */}
+        <div className="mt-4">
+          <p className="text-xs font-medium tracking-wide text-white/50 uppercase">Style</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {Object.values(STYLES).map((s) => {
+              const active = s.name === style;
+              return (
+                <button
+                  key={s.name}
+                  onClick={() => setStyle(s.name)}
+                  aria-pressed={active}
+                  className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition ${
+                    active
+                      ? 'border-emerald-400 bg-emerald-400/15 text-white'
+                      : 'border-white/15 text-white/70 hover:bg-white/10'
+                  }`}
+                >
+                  <span
+                    className="h-3 w-3 rounded-full border border-black/30"
+                    style={{
+                      background: `linear-gradient(135deg, ${s.palette.mid}, ${s.palette.peak})`,
+                    }}
+                  />
+                  {s.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         <div className="mt-4 flex justify-end gap-3">
           <button
