@@ -20,6 +20,8 @@ export const STALE_MS = 5000;
 export interface Traveller {
   id: string;
   x: number;
+  /** Ground height — people stand on terrain of different elevations. */
+  y: number;
   z: number;
   /** Heading in radians, for orienting the wisp. */
   a: number;
@@ -60,6 +62,7 @@ export function joinTravellerChannel(
       onMove({
         id: p.id,
         x: p.x,
+        y: typeof p.y === 'number' ? p.y : 0,
         z: p.z,
         a: typeof p.a === 'number' ? p.a : 0,
         color: typeof p.color === 'string' ? p.color : colorForId(p.id),
