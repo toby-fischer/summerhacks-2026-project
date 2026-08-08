@@ -86,8 +86,25 @@ function render(d) {
     bar(stack / 4, 10, 0.4),
     stack > 1.6 ? c.amber(stack.toFixed(2) + ' CLAMPED') : stack.toFixed(2),
     c.dim(`(${d.blend.inRange} zones in range)`),
-    d.blend.clearing > 0 ? c.cyan(`clearing ${d.blend.clearing.toFixed(2)}`) : '',
   );
+
+  // Clearing is a contest between the nearest clear zone and the nearest
+  // weather, so show both sides and who is winning.
+  if (d.blend.clearing > 0) {
+    const calm = d.blend.calm ?? 1;
+    console.log(
+      c.dim('  clear  '),
+      c.cyan(`${d.blend.clearing.toFixed(2)}`),
+      c.dim('vs weather'),
+      `${(d.blend.weatherMax ?? 0).toFixed(2)}`,
+      c.dim('→'),
+      calm < 0.05
+        ? c.cyan('fully cleared')
+        : calm > 0.95
+          ? c.dim('no effect')
+          : c.amber(`${Math.round((1 - calm) * 100)}% cleared`),
+    );
+  }
 
   const rows = [
     ['fog', a.fog, 0.9],

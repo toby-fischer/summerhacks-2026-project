@@ -37,12 +37,29 @@ const MAX_WEIGHT = 1.6;
 /**
  * How hard a clear zone pushes weather back toward calm.
  *
- * Above 1 so that clearing at full intensity beats a single storm of equal
- * strength standing on the same spot — otherwise pressing Clear inside a storm
- * would leave it half-storming, which reads as broken. Someone who wants the
- * storm back can summon it again; the row was never deleted.
+ * Slightly above 1 so that pressing Clear inside a storm wins: both zones are
+ * then centred on you, and a dead tie would leave it half-storming, which reads
+ * as broken. Someone who wants the storm back can summon it again; the row was
+ * never deleted.
+ *
+ * Kept close to 1 on purpose. Because clearing now contests the strongest
+ * weather zone rather than the sum, this is directly a distance handicap: at
+ * 1.35 a clear zone won from noticeably further away than the storm it beat,
+ * which is how seven of them came to blanket the world. At 1.1 clearing has to
+ * be roughly as close as the weather it cancels.
  */
-const CLEAR_AUTHORITY = 1.35;
+const CLEAR_AUTHORITY = 1.1;
+
+/**
+ * Floor on the weather a clear zone is measured against.
+ *
+ * Clearing contests the *strongest* weather zone here, not the sum — see the
+ * loop below. Without a floor, a lone distant storm contributing 0.05 would be
+ * cancelled by an equally distant clear, which is true but pointless: neither
+ * is felt. Measuring against at least this much keeps faint weather faint
+ * rather than letting a far-off clear snap it to nothing.
+ */
+const MIN_CONTEST = 0.35;
 
 /** A weather contribution with its payload resolved. */
 export type WeatherContribution = Contribution<WeatherPayload>;
@@ -120,10 +137,24 @@ export function sampleInto(
   let fog = 0;
   let glow = 0;
 
-  // Clearing weight accumulates separately — it isn't weather, it's the
-  // absence of it, and it has to be known in full before it can cancel
-  // anything. Gathering both in one pass is what lets a single loop stay.
-  let clearWeight = 0;
+  // Clearing is tracked as the single strongest clear zone reaching this spot,
+  // not as a sum — and the weather it fights is likewise the strongest single
+  // zone. Both are gathered in the same pass as everything else.
+  //
+  // Summing was the original mistake. Seven clear zones scattered across the
+  // map summed to 4.12 against 3.34 of storm, so the dead centre of a storm was
+  // calm and no weather could be felt anywhere in the world. Capping both sides
+  // only moved the problem: with each total pinned to its own ceiling the ratio
+  // became a constant, and every populated spot read identically calm.
+  //
+  // Strongest-wins makes clearing local, which is what it always meant. Being
+  // inside one clear zone is the same as being inside five, so a pile of old
+  // clears can't out-vote a storm you're standing in — but the clear you just
+  // dropped at your feet still wins, because up close it is the strongest thing
+  // around. Distance decides it, which is the only honest arbiter when everyone
+  // is contributing to one sky.
+  let clearMax = 0;
+  let weatherMax = 0;
 
   for (let i = 0; i < zones.length; i++) {
     const zone = zones[i];
@@ -148,9 +179,11 @@ export function sampleInto(
     // A clearing zone contributes no weather of its own; it earns the right to
     // cancel what others contributed.
     if (condition.clears) {
-      clearWeight += weight * CLEAR_AUTHORITY;
+      if (weight > clearMax) clearMax = weight;
       continue;
     }
+
+    if (weight > weatherMax) weatherMax = weight;
 
     const a = condition.atmosphere;
 
@@ -174,8 +207,12 @@ export function sampleInto(
   // zones asked for actually survives. Scaling the accumulators rather than
   // lerping the finished atmosphere keeps everything downstream — including
   // the weighted averages, which divide by weightSum — internally consistent.
-  if (clearWeight > 0) {
-    const calm = Math.max(0, 1 - clearWeight / weightSum);
+  if (clearMax > 0) {
+    // Strongest clear against strongest weather. Both are single zones, so
+    // this is a contest of proximity: whichever you are standing closer to
+    // wins, and a tie leaves the sky half-weathered.
+    const against = Math.max(weatherMax, MIN_CONTEST);
+    const calm = Math.max(0, 1 - Math.min(1, (clearMax * CLEAR_AUTHORITY) / against));
     if (calm <= 0.001) return out; // fully cleared: the baseline already in `out`
     rain *= calm;
     snow *= calm;

@@ -28,8 +28,11 @@ const REPORT_MS = 1000;
 
 const ENABLED = process.env.NODE_ENV !== 'production';
 
-/** Matches CLEAR_AUTHORITY in weather/blend.ts. */
-const CLEAR_AUTHORITY = 1.35;
+/** Match weather/blend.ts. Clearing contests the strongest single weather
+ *  zone, not the sum — reporting it any other way would have the panel
+ *  disagreeing with the sky it is supposed to explain. */
+const CLEAR_AUTHORITY = 1.1;
+const MIN_CONTEST = 0.35;
 
 export interface DebugBridgeHandlers {
   onTeleport: (x: number, z: number) => void;
@@ -66,7 +69,8 @@ export function useDebugBridge(state: DebugBridgeState, handlers: DebugBridgeHan
       // weather/blend.ts — this is the number that explained the darkness bug,
       // so it is the one thing worth duplicating rather than inferring.
       let stack = 0;
-      let clearing = 0;
+      let clearMax = 0;
+      let weatherMax = 0;
       let inRange = 0;
       for (const z of s.zones) {
         const radius = z.payload.radius > 0 ? z.payload.radius : 220;
@@ -78,9 +82,20 @@ export function useDebugBridge(state: DebugBridgeState, handlers: DebugBridgeHan
         const f = 1 - Math.min(1, dist / radius);
         const weight =
           f * f * (3 - 2 * f) * Math.max(0, Math.min(1, z.payload.intensity));
-        if (conditionFor(z.payload.condition).clears) clearing += weight * CLEAR_AUTHORITY;
-        else stack += weight;
+        if (conditionFor(z.payload.condition).clears) {
+          if (weight > clearMax) clearMax = weight;
+        } else {
+          stack += weight;
+          if (weight > weatherMax) weatherMax = weight;
+        }
       }
+
+      // How much of the weather actually survives clearing, 0..1 — the single
+      // number that explains why the sky looks the way it does.
+      const calm =
+        clearMax > 0 && weatherMax > 0
+          ? Math.max(0, 1 - Math.min(1, (clearMax * CLEAR_AUTHORITY) / Math.max(weatherMax, MIN_CONTEST)))
+          : 1;
 
       const t = s.timeOverride ?? timeOfDay();
 
@@ -89,6 +104,11 @@ export function useDebugBridge(state: DebugBridgeState, handlers: DebugBridgeHan
         notes.push(`weather stack ${stack.toFixed(2)} exceeds MAX_WEIGHT — sampler is clamping`);
       }
       if (w.fog > 0.95) notes.push('fog at maximum — visibility is near zero here');
+      if (weatherMax > 0 && calm < 0.05) {
+        notes.push(
+          `weather here is fully cleared (clear ${clearMax.toFixed(2)} vs weather ${weatherMax.toFixed(2)}) — a clear zone is closer than the weather`,
+        );
+      }
       if (!s.counts.patches) notes.push('no terrain loaded');
 
       try {
@@ -109,7 +129,9 @@ export function useDebugBridge(state: DebugBridgeState, handlers: DebugBridgeHan
             },
             blend: {
               stack: +stack.toFixed(3),
-              clearing: +clearing.toFixed(3),
+              clearing: +clearMax.toFixed(3),
+              weatherMax: +weatherMax.toFixed(3),
+              calm: +calm.toFixed(3),
               inRange,
             },
             counts: { ...s.counts, zones: s.zones.length },
