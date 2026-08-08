@@ -218,7 +218,6 @@ function Walker({
   const { camera } = useThree();
   const move = useRef({ f: false, b: false, l: false, r: false, sprint: false });
   const dir = useRef(new THREE.Vector3());
-  const euler = useRef(new THREE.Euler(0, 0, 0, 'YXZ'));
   const lastSend = useRef(0);
   const locked = useRef(false);
 
@@ -257,10 +256,12 @@ function Walker({
     const side = Number(m.r) - Number(m.l);
 
     if (fwd || side) {
-      dir.current.set(side, 0, fwd).normalize().multiplyScalar(speed);
-      euler.current.set(0, camera.rotation.y, 0);
-      dir.current.applyEuler(euler.current);
-      camera.position.add(dir.current);
+      dir.current.set(side, 0, fwd).applyQuaternion(camera.quaternion);
+      dir.current.y = 0;
+      if (dir.current.lengthSq() > 0) {
+        dir.current.normalize().multiplyScalar(speed);
+        camera.position.add(dir.current);
+      }
     }
 
     // Stick to whatever terrain is underfoot; lerped so a ridge is a fall.
