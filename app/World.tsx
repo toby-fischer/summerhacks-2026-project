@@ -39,6 +39,7 @@ const SKETCH_GRID = 64;
 const PATCH_SCALE = 300;
 const PATCH_MAX_H = 60;
 const EYE = 1.8;
+const PROXIMITY_AUDIO_DISTANCE = 15; // Max distance in meters to hear animal
 
 // Preset color options for the marker
 const COLOR_PALETTE = [
@@ -74,6 +75,7 @@ interface AnimalData {
   z: number;
   outlineSketch: string;
   patternSketch: string;
+  soundDataUrl?: string | null;
 }
 
 /* ------------------------------------------------------------ encoding --- */
@@ -203,6 +205,51 @@ function AnimalMesh({
   animal: AnimalData;
   groundY: number;
 }) {
+  const { camera } = useThree();
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Setup Audio Object
+  useEffect(() => {
+    if (!animal.soundDataUrl) return;
+    const audio = new Audio(animal.soundDataUrl);
+    audio.loop = true; // Enable native looping
+    audioRef.current = audio;
+
+    return () => {
+      audio.pause();
+      audioRef.current = null;
+    };
+  }, [animal.soundDataUrl]);
+
+  // Handle continuous proximity volume updates and playback loop
+  useFrame(() => {
+    if (!audioRef.current) return;
+
+    const dx = camera.position.x - animal.x;
+    const dz = camera.position.z - animal.z;
+    const distance = Math.hypot(dx, dz);
+
+    const inRange = distance <= PROXIMITY_AUDIO_DISTANCE;
+
+    if (inRange) {
+      // Attenuate volume dynamically based on distance
+      const volume = Math.max(0, 1 - distance / PROXIMITY_AUDIO_DISTANCE);
+      audioRef.current.volume = volume;
+
+      // Start looping if not already playing
+      if (audioRef.current.paused) {
+        audioRef.current.play().catch(() => {
+          // Playback blocked if user hasn't interacted with page yet
+        });
+      }
+    } else {
+      // Pause playback when out of range
+      if (!audioRef.current.paused) {
+        audioRef.current.pause();
+      }
+    }
+  });
+
   const { geometry, texture, height } = useMemo(() => {
     const rawOutline = decodeColorSketch(animal.outlineSketch);
     const patternColorGrid = decodeColorSketch(animal.patternSketch);
@@ -698,6 +745,7 @@ export default function World() {
         z: Number(r.z) || 0,
         outlineSketch: props.outlineSketch,
         patternSketch: props.patternSketch,
+        soundDataUrl: typeof props.soundDataUrl === 'string' ? props.soundDataUrl : null,
       };
     };
 
@@ -816,6 +864,7 @@ export default function World() {
     (
       outlineGrid: Uint8Array,
       patternGrid: Uint8Array,
+      soundDataUrl: string | null,
       x: number,
       z: number,
     ) => {
@@ -823,14 +872,14 @@ export default function World() {
       const patternSketch = encodeColorSketch(patternGrid);
       const tempId = `temp-animal-${Math.random() * 1e9}`;
 
-      setAnimals((prev) => [...prev, { id: tempId, x, z, outlineSketch, patternSketch }]);
+      setAnimals((prev) => [...prev, { id: tempId, x, z, outlineSketch, patternSketch, soundDataUrl }]);
       setAnimalDrawAt(null);
 
       if (!supabase) return;
 
       supabase
         .from('world_assets')
-        .insert({ x, z, type: 'animal', properties: { outlineSketch, patternSketch } })
+        .insert({ x, z, type: 'animal', properties: { outlineSketch, patternSketch, soundDataUrl } })
         .select()
         .then(({ data, error }) => {
           setAnimals((prev) => {
@@ -840,7 +889,7 @@ export default function World() {
             const id = String(row.id);
             return without.some((a) => a.id === id)
               ? without
-              : [...without, { id, x, z, outlineSketch, patternSketch }];
+              : [...without, { id, x, z, outlineSketch, patternSketch, soundDataUrl }];
           });
         });
     },
@@ -924,8 +973,8 @@ export default function World() {
       {animalDrawAt && (
         <AnimalDrawPanel
           onCancel={() => setAnimalDrawAt(null)}
-          onCommit={(outlineGrid, patternGrid) =>
-            commitAnimal(outlineGrid, patternGrid, animalDrawAt.x, animalDrawAt.z)
+          onCommit={(outlineGrid, patternGrid, soundDataUrl) =>
+            commitAnimal(outlineGrid, patternGrid, soundDataUrl, animalDrawAt.x, animalDrawAt.z)
           }
         />
       )}
@@ -1121,11 +1170,22 @@ export function AnimalDrawPanel({
   onCommit: (
     outlineGrid: Uint8Array,
     patternGrid: Uint8Array,
+    soundDataUrl: string | null,
   ) => void;
   onCancel: () => void;
 }) {
-  const [step, setStep] = useState<'outline' | 'pattern'>('outline');
+  const [step, setStep] = useState<'outline' | 'pattern' | 'sound'>('outline');
   const [outlineGrid, setOutlineGrid] = useState<Uint8Array | null>(null);
+  const [patternGrid, setPatternGrid] = useState<Uint8Array | null>(null);
+
+  // Audio recording states
+  const [isRecording, setIsRecording] = useState(false);
+  const [timeLeft, setTimeLeft] = useState(5);
+  const [soundDataUrl, setSoundDataUrl] = useState<string | null>(null);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
@@ -1232,17 +1292,80 @@ export function AnimalDrawPanel({
     return colorGrid;
   }, []);
 
-  const handleNext = () => {
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = () => {
+          setSoundDataUrl(reader.result as string);
+        };
+        stream.getTracks().forEach((track) => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setTimeLeft(5);
+
+      timerRef.current = setInterval(() => {
+        setTimeLeft((prev) => {
+          if (prev <= 1) {
+            stopRecording();
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } catch (err) {
+      console.error('Microphone access error:', err);
+    }
+  };
+
+  const stopRecording = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    setIsRecording(false);
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onloadend = () => {
+      setSoundDataUrl(reader.result as string);
+    };
+  };
+
+  const handleNextToPattern = () => {
     const grid = captureColorGrid();
     setOutlineGrid(grid);
     setStep('pattern');
     setMarkerSize(20);
   };
 
+  const handleNextToSound = () => {
+    const grid = captureColorGrid();
+    setPatternGrid(grid);
+    setStep('sound');
+  };
+
   const handleDone = () => {
-    if (!outlineGrid) return;
-    const patternGrid = captureColorGrid();
-    onCommit(outlineGrid, patternGrid);
+    if (!outlineGrid || !patternGrid) return;
+    onCommit(outlineGrid, patternGrid, soundDataUrl);
   };
 
   return (
@@ -1253,15 +1376,18 @@ export function AnimalDrawPanel({
     >
       <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
         <h2 className="text-lg font-semibold text-white">
-          {step === 'outline' ? '1. Draw Animal Outline' : '2. Draw Animal Pattern'}
+          {step === 'outline' && '1. Draw Animal Outline'}
+          {step === 'pattern' && '2. Draw Animal Pattern'}
+          {step === 'sound' && '3. Add Animal Sound'}
         </h2>
         <p className="mt-1 text-sm text-white/60">
-          {step === 'outline'
-            ? 'Sketch the profile silhouette of your creature.'
-            : 'Paint spots, stripes, or skin details onto the form.'}
+          {step === 'outline' && 'Sketch the profile silhouette of your creature.'}
+          {step === 'pattern' && 'Paint spots, stripes, or skin details onto the form.'}
+          {step === 'sound' && 'Record a 5-second sound or upload an audio file for your animal.'}
         </p>
 
-        {/* Toolbar: Colors and Marker Sizes */}
+        {step !== 'sound' && (
+          <>
         <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
           <div className="flex flex-wrap gap-1.5">
             {COLOR_PALETTE.map((c) => (
@@ -1306,6 +1432,61 @@ export function AnimalDrawPanel({
           onPointerLeave={stopDrawing}
           className="mt-3 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
         />
+          </>
+        )}
+
+        {step === 'sound' && (
+          <div className="mt-6 flex flex-col items-center justify-center space-y-4 rounded-lg border border-white/10 bg-black/40 p-8">
+            {isRecording ? (
+              <div className="text-center">
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-500/20 text-red-500 animate-pulse">
+                  🎙️
+                </div>
+                <p className="mt-3 text-lg font-bold text-red-400">Recording... {timeLeft}s</p>
+              </div>
+            ) : soundDataUrl ? (
+              <div className="w-full text-center space-y-3">
+                <p className="text-sm text-emerald-400 font-medium">✓ Sound added successfully!</p>
+                <audio src={soundDataUrl} controls className="w-full" />
+                <button
+                  onClick={() => setSoundDataUrl(null)}
+                  className="text-xs text-white/60 hover:text-white underline"
+                >
+                  Remove sound / Choose another
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center gap-4 w-full">
+                <div className="flex items-center gap-6">
+                  <div className="flex flex-col items-center">
+                <button
+                  onClick={startRecording}
+                  className="flex h-16 w-16 items-center justify-center rounded-full bg-amber-500 text-2xl text-neutral-950 transition-transform hover:scale-105"
+                >
+                  🎙️
+                </button>
+                    <span className="mt-2 text-xs text-white/70">Record 5s</span>
+                  </div>
+
+                  <div className="text-xs text-white/40 font-medium">OR</div>
+
+                  <div className="flex flex-col items-center">
+                    <label className="flex h-16 w-16 cursor-pointer items-center justify-center rounded-full bg-blue-600 text-2xl text-white transition-transform hover:scale-105">
+                      📁
+                      <input
+                        type="file"
+                        accept="audio/*"
+                        onChange={handleFileUpload}
+                        className="hidden"
+                      />
+                    </label>
+                    <span className="mt-2 text-xs text-white/70">Upload Audio File</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="mt-4 flex justify-end gap-3">
           <button
@@ -1315,17 +1496,33 @@ export function AnimalDrawPanel({
             Cancel
           </button>
 
-          {step === 'outline' ? (
+          {step === 'outline' && (
             <button
-              onClick={handleNext}
+              onClick={handleNextToPattern}
               className="rounded-md bg-amber-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-amber-400"
             >
               Next: Pattern
             </button>
-          ) : (
+          )}
+
+          {step === 'pattern' && (
+            <button
+              onClick={handleNextToSound}
+              className="rounded-md bg-amber-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-amber-400"
+            >
+              Next: Sound
+            </button>
+          )}
+
+          {step === 'sound' && (
             <button
               onClick={handleDone}
-              className="rounded-md bg-emerald-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-emerald-400"
+              disabled={isRecording}
+              className={`rounded-md px-5 py-2 text-sm font-medium text-neutral-950 ${
+                isRecording
+                  ? 'bg-neutral-600 cursor-not-allowed'
+                  : 'bg-emerald-500 hover:bg-emerald-400'
+              }`}
             >
               Done & Spawn
             </button>
