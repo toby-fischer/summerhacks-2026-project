@@ -57,11 +57,105 @@ interface VegetationInstance {
   normal: [number, number, number];
 }
 
+interface PlantComponent {
+  shape: 'cylinder' | 'cone' | 'sphere' | 'box' | 'torus';
+  position: [number, number, number];
+  rotation: [number, number, number];
+  scale: [number, number, number] | number;
+  color: string;
+  radius?: number;
+  radiusTop?: number;
+  radiusBottom?: number;
+  height?: number;
+  width?: number;
+  depth?: number;
+  tube?: number;
+  radialSegments?: number;
+  tubularSegments?: number;
+}
+
+interface PlantModel {
+  type: string;
+  components: PlantComponent[];
+}
+
 interface VegetationPatch {
   id: string;
   type: string;
   instances: VegetationInstance[];
+  model: PlantModel;
 }
+
+const parseComponentGeometry = (component: PlantComponent) => {
+  const radialSegments = component.radialSegments ?? 10;
+  const tubularSegments = component.tubularSegments ?? 16;
+  const color = new THREE.Color(component.color);
+
+  let geometry: THREE.BufferGeometry;
+  switch (component.shape) {
+    case 'cylinder': {
+      const radiusTop = component.radiusTop ?? component.radius ?? 0.15;
+      const radiusBottom = component.radiusBottom ?? component.radius ?? 0.15;
+      const height = component.height ?? 1;
+      geometry = new THREE.CylinderGeometry(radiusTop, radiusBottom, height, radialSegments, 1, false);
+      break;
+    }
+    case 'cone': {
+      const radius = component.radius ?? 0.2;
+      const height = component.height ?? 1;
+      geometry = new THREE.ConeGeometry(radius, height, radialSegments, 1);
+      break;
+    }
+    case 'sphere': {
+      const radius = component.radius ?? 0.25;
+      geometry = new THREE.SphereGeometry(radius, radialSegments, Math.max(6, radialSegments));
+      break;
+    }
+    case 'box': {
+      const width = component.width ?? 0.5;
+      const height = component.height ?? 0.5;
+      const depth = component.depth ?? 0.5;
+      geometry = new THREE.BoxGeometry(width, height, depth);
+      break;
+    }
+    case 'torus': {
+      const radius = component.radius ?? 0.25;
+      const tube = component.tube ?? 0.08;
+      geometry = new THREE.TorusGeometry(radius, tube, radialSegments, tubularSegments);
+      break;
+    }
+    default:
+      geometry = new THREE.SphereGeometry(0.25, 10, 8);
+  }
+
+  const scale = component.scale;
+  if (typeof scale === 'number') {
+    geometry.scale(scale, scale, scale);
+  } else {
+    geometry.scale(scale[0], scale[1], scale[2]);
+  }
+
+  geometry.rotateX(component.rotation[0]);
+  geometry.rotateY(component.rotation[1]);
+  geometry.rotateZ(component.rotation[2]);
+  geometry.translate(component.position[0], component.position[1], component.position[2]);
+  paintVertexColors(geometry, color);
+  return geometry;
+};
+
+const createGeometryFromModel = (model: PlantModel) => {
+  try {
+    const components = model.components.map(parseComponentGeometry);
+    if (!components.length) {
+      return createPlantGeometry(model.type);
+    }
+    const merged = BufferGeometryUtils.mergeGeometries(components, false) as THREE.BufferGeometry;
+    merged.computeVertexNormals();
+    return merged;
+  } catch (error) {
+    return createPlantGeometry(model.type);
+  }
+};
 
 const hashString = (value: string) => {
   let hash = 2166136261;
@@ -408,6 +502,7 @@ const createVegetationPatch = (
   x: number,
   z: number,
   type: string,
+  model: PlantModel,
 ) => {
   const seed = hashString(`${type}:${x.toFixed(2)}:${z.toFixed(2)}`);
   const rand = seededRandom(seed);
@@ -438,6 +533,7 @@ const createVegetationPatch = (
     id: `${Date.now()}-${type.replace(/\s+/g, '-')}`,
     type,
     instances,
+    model,
   };
 };
 
@@ -626,33 +722,15 @@ function PlantInstances({
 }
 
 function VegetationLayer({ patches }: { patches: VegetationPatch[] }) {
-  const plantsByType = useMemo(() => {
-    const groups = new Map<string, VegetationInstance[]>();
-    for (const patch of patches) {
-      const list = groups.get(patch.type) ?? [];
-      list.push(...patch.instances);
-      groups.set(patch.type, list);
-    }
-    return groups;
-  }, [patches]);
-
-  const plantGeometries = useMemo(() => {
-    const map = new Map<string, THREE.BufferGeometry>();
-    for (const type of plantsByType.keys()) {
-      map.set(type, createPlantGeometry(type));
-    }
-    return map;
-  }, [plantsByType]);
-
   if (!patches.length) return null;
 
   return (
     <>
-      {Array.from(plantsByType.entries()).map(([type, instances]) => (
+      {patches.map((patch) => (
         <PlantInstances
-          key={type}
-          geometry={plantGeometries.get(type)!}
-          instances={instances}
+          key={patch.id}
+          geometry={createGeometryFromModel(patch.model)}
+          instances={patch.instances}
         />
       ))}
     </>
@@ -786,10 +864,44 @@ export default function World() {
   }, []);
 
   const plantVegetation = useCallback(
-    (type: string, x: number, z: number) => {
-      if (!type.trim()) return;
-      setVegetationPatches((prev) => [...prev, createVegetationPatch(built, x, z, type.trim())]);
-      setVegetationAt(null);
+    async (type: string, x: number, z: number) => {
+      const trimmed = type.trim();
+      if (!trimmed) return;
+
+      try {
+        const response = await fetch('/api/generate-model', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: trimmed }),
+        });
+
+        const json = await response.json().catch(() => ({ error: 'Invalid JSON response from /api/generate-model.' }));
+        if (!response.ok) {
+          console.error('AI model generation failed', {
+            status: response.status,
+            statusText: response.statusText,
+            body: json,
+          });
+          setVegetationAt(null);
+          return;
+        }
+
+        if (!json?.model) {
+          console.error('AI model generation failed, missing model in response', json);
+          setVegetationAt(null);
+          return;
+        }
+
+        const model: PlantModel = json.model;
+        setVegetationPatches((prev) => [
+          ...prev,
+          createVegetationPatch(built, x, z, trimmed, model),
+        ]);
+      } catch (error) {
+        console.error('AI model generation error', error);
+      } finally {
+        setVegetationAt(null);
+      }
     },
     [built],
   );
