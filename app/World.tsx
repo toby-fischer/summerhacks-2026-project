@@ -29,6 +29,7 @@ import {
 } from './world/terrain';
 import { Weather, CONDITIONS } from './world/weather';
 import { Minimap, type MinimapSelf } from './world/Minimap';
+import { CreatureMesh, CreatureDrawPanel, type Creature } from './world/creature';
 import type { Contribution, WeatherPayload } from './world/contract';
 import {
   BROADCAST_MS,
@@ -203,6 +204,7 @@ function Walker({
   mapSelf,
   onOpenDraw,
   onOpenWeather,
+  onOpenCreature,
   onFlyChange,
 }: {
   built: BuiltPatch[];
@@ -212,6 +214,7 @@ function Walker({
   mapSelf: React.RefObject<MinimapSelf>;
   onOpenDraw: (x: number, z: number) => void;
   onOpenWeather: (x: number, z: number) => void;
+  onOpenCreature: (x: number, z: number) => void;
   onFlyChange: (flying: boolean) => void;
 }) {
   const { camera } = useThree();
@@ -277,6 +280,10 @@ function Walker({
         e.preventDefault();
         onOpenWeather(camera.position.x, camera.position.z);
       }
+      if (e.code === 'KeyR' && locked.current) {
+        e.preventDefault();
+        onOpenCreature(camera.position.x, camera.position.z);
+      }
     };
     const up = (e: KeyboardEvent) => set(e.code, false);
     const blur = clearKeys;
@@ -289,7 +296,7 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw, onOpenWeather, onFlyChange]);
+  }, [camera, onOpenDraw, onOpenWeather, onOpenCreature, onFlyChange]);
 
   useFrame((_, delta) => {
     const m = move.current;
@@ -386,8 +393,10 @@ export default function World() {
   const [patches, setPatches] = useState<Patch[]>([]);
   const [zones, setZones] = useState<Contribution<WeatherPayload>[]>([]);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
+  const [creatures, setCreatures] = useState<Creature[]>([]);
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [weatherAt, setWeatherAt] = useState<{ x: number; z: number } | null>(null);
+  const [creatureAt, setCreatureAt] = useState<{ x: number; z: number } | null>(null);
   const [flying, setFlying] = useState(false);
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
@@ -471,12 +480,30 @@ export default function World() {
       };
     };
 
+    // Creatures store two sketches and nothing else — the geometry is
+    // regenerated from them on every client, same recipe-not-result rule the
+    // terrain follows.
+    const toCreature = (r: Record<string, unknown>): Creature | null => {
+      if (String(r.type) !== 'creature') return null;
+      const props = (r.properties ?? {}) as Record<string, unknown>;
+      if (typeof props.outlineSketch !== 'string') return null;
+      if (typeof props.patternSketch !== 'string') return null;
+      return {
+        id: String(r.id),
+        x: Number(r.x) || 0,
+        z: Number(r.z) || 0,
+        rotation: Number(props.rotation) || 0,
+        outlineSketch: props.outlineSketch,
+        patternSketch: props.patternSketch,
+      };
+    };
+
     // One query for the whole world, split client-side. Two round trips to load
     // a world that fits in one is a worse deal than filtering an array.
     supabase
       .from('world_assets')
       .select('*')
-      .in('type', ['terrain', 'weather'])
+      .in('type', ['terrain', 'weather', 'creature'])
       .then(({ data, error }) => {
         if (cancelled || error || !data) return;
 
@@ -487,6 +514,15 @@ export default function World() {
             if (String(r.type) !== 'terrain') continue;
             const p = toPatch(r);
             if (p) byId.set(p.id, p);
+          }
+          return [...byId.values()];
+        });
+
+        setCreatures((prev) => {
+          const byId = new Map(prev.map((c) => [c.id, c]));
+          for (const row of data) {
+            const c = toCreature(row as Record<string, unknown>);
+            if (c) byId.set(c.id, c);
           }
           return [...byId.values()];
         });
@@ -512,6 +548,12 @@ export default function World() {
           const z = toZone(row);
           if (z) {
             setZones((prev) => (prev.some((q) => q.id === z.id) ? prev : [...prev, z]));
+            return;
+          }
+
+          const c = toCreature(row);
+          if (c) {
+            setCreatures((prev) => (prev.some((q) => q.id === c.id) ? prev : [...prev, c]));
             return;
           }
 
@@ -606,6 +648,59 @@ export default function World() {
     [],
   );
 
+  /* -------- contribute creature -------- */
+
+  const commitCreature = useCallback(
+    (
+      outline: Float32Array<ArrayBuffer>,
+      pattern: Float32Array<ArrayBuffer>,
+      x: number,
+      z: number,
+    ) => {
+      const outlineSketch = encodeSketch(outline);
+      const patternSketch = encodeSketch(pattern);
+      // Face a random direction, so a crowd of creatures doesn't line up like
+      // a shop display.
+      const rotation = Math.random() * Math.PI * 2;
+      const tempId = `temp-c-${Math.floor(Math.random() * 1e9)}`;
+
+      const optimistic: Creature = {
+        id: tempId,
+        x,
+        z,
+        rotation,
+        outlineSketch,
+        patternSketch,
+      };
+      setCreatures((prev) => [...prev, optimistic]);
+      setCreatureAt(null);
+
+      if (!supabase) return;
+
+      supabase
+        .from('world_assets')
+        .insert({
+          x,
+          z,
+          type: 'creature',
+          color: '#d9c9a3',
+          properties: { outlineSketch, patternSketch, rotation },
+        })
+        .select()
+        .then(({ data, error }) => {
+          setCreatures((prev) => {
+            const without = prev.filter((c) => c.id !== tempId);
+            if (error || !data?.length) return without; // roll back on failure
+            const id = String((data[0] as Record<string, unknown>).id);
+            return without.some((c) => c.id === id)
+              ? without
+              : [...without, { ...optimistic, id }];
+          });
+        });
+    },
+    [],
+  );
+
   /* -------- contribute weather -------- */
 
   const summonWeather = useCallback(
@@ -659,6 +754,7 @@ export default function World() {
 
     setPatches([]);
     setZones([]);
+    setCreatures([]);
     cache.current.clear();
 
     if (!supabase) return;
@@ -667,7 +763,7 @@ export default function World() {
     const { error } = await supabase
       .from('world_assets')
       .delete()
-      .in('type', ['terrain', 'weather']);
+      .in('type', ['terrain', 'weather', 'creature']);
     if (error) console.error('reset failed', error);
   }, []);
 
@@ -709,6 +805,10 @@ export default function World() {
           <PatchMesh key={b.id} built={b} />
         ))}
 
+        {creatures.map((c) => (
+          <CreatureMesh key={c.id} creature={c} groundY={groundAt(built, c.x, c.z)} />
+        ))}
+
         {travellers.map((t) => (
           <Wisp key={t.id} traveller={t} />
         ))}
@@ -720,6 +820,7 @@ export default function World() {
           mapSelf={mapSelf}
           onOpenDraw={(x, z) => setDrawAt({ x, z })}
           onOpenWeather={(x, z) => setWeatherAt({ x, z })}
+          onOpenCreature={(x, z) => setCreatureAt({ x, z })}
           onFlyChange={setFlying}
         />
       </Canvas>
@@ -738,7 +839,8 @@ export default function World() {
       <div className="absolute left-6 top-6 rounded-lg bg-black/50 p-4 backdrop-blur">
         <h1 className="text-lg font-semibold text-white">Infinite Terra</h1>
         <p className="mt-1 text-sm text-white/70">
-          {patches.length} landform{patches.length === 1 ? '' : 's'} · {label}
+          {patches.length} landform{patches.length === 1 ? '' : 's'} ·{' '}
+          {creatures.length} creature{creatures.length === 1 ? '' : 's'} · {label}
         </p>
         {/* Dev-only. Pull this before judging — a wipe button next to a shared
             world is a great way to lose everyone's work mid-demo. */}
@@ -763,6 +865,7 @@ export default function World() {
         </p>
         <p>
           <span className="text-white/85">E</span> to raise mountains ·{' '}
+          <span className="text-white/85">R</span> to draw a creature ·{' '}
           <span className="text-white/85">Q</span> to summon weather ·{' '}
           <span className="text-white/85">Double-tap Space</span> to{' '}
           {flying ? 'land' : 'fly'} · <span className="text-white/85">Esc</span> to release
@@ -780,6 +883,15 @@ export default function World() {
         <DrawPanel
           onCancel={() => setDrawAt(null)}
           onCommit={(grid, style) => commit(grid, drawAt.x, drawAt.z, style)}
+        />
+      )}
+
+      {creatureAt && (
+        <CreatureDrawPanel
+          onCancel={() => setCreatureAt(null)}
+          onCommit={(outline, pattern) =>
+            commitCreature(outline, pattern, creatureAt.x, creatureAt.z)
+          }
         />
       )}
 
