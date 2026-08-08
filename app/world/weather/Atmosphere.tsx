@@ -136,7 +136,12 @@ export function AtmosphereRig({ state, timeOverride = null }: AtmosphereProps) {
 
     // Whatever the sky doesn't cover shows through to here. At night that's
     // everything, which is exactly how the dark sky gets drawn.
-    scratch.sky.copy(NIGHT_SKY).lerp(scratch.tint, day * 0.55 * (1 - w.gloom * 0.6));
+    //
+    // The gloom term was `1 - gloom * 0.6`, which under a storm pulled the
+    // daytime sky 60% of the way to night — that, more than the sun, is what
+    // made bad weather look like a power cut. At 0.35 an overcast sky is
+    // heavy and grey while still reading unmistakably as daytime.
+    scratch.sky.copy(NIGHT_SKY).lerp(scratch.tint, day * 0.55 * (1 - w.gloom * 0.35));
     // Bioluminescent air lifts the night sky slightly toward the weather tint.
     if (w.glow > 0.01) {
       scratch.sky.lerp(scratch.tint, w.glow * 0.22 * (1 - day));
@@ -172,7 +177,11 @@ export function AtmosphereRig({ state, timeOverride = null }: AtmosphereProps) {
     if (sunRef.current) {
       sunRef.current.position.copy(scratch.sun).multiplyScalar(220);
       sunRef.current.color.copy(scratch.sunColor);
-      sunRef.current.intensity = day * 2.1 * (1 - w.gloom * 0.72);
+      // Gloom takes at most half the key light. It used to take 72%, which
+      // combined with a near-black storm tint to leave the terrain unreadable
+      // — the world went dark rather than overcast. Losing the sun should
+      // flatten the light, not switch it off.
+      sunRef.current.intensity = day * 2.1 * (1 - w.gloom * 0.5);
       // Shadow work is wasted once the sun is down or the sky is closed over.
       sunRef.current.castShadow = day > 0.15 && w.cloud < 0.85;
     }

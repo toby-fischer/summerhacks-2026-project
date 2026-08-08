@@ -20,6 +20,30 @@
 import type { Contribution, WeatherPayload } from '../contract';
 import { CLEAR, conditionFor, type Atmosphere } from './conditions';
 
+/**
+ * Ceiling on how much weather can pile onto one spot.
+ *
+ * Weight is `intensity * falloff`, so a single zone at full strength is 1.
+ * Without a cap, three overlapping storms summed to a weight near 3 and the
+ * result was a black screen — the darkness the world actually shipped with.
+ *
+ * At 1.6 a second zone still visibly deepens the weather and a third adds a
+ * little, but the fourth cannot take the world anywhere the third didn't. The
+ * point is that stacking saturates rather than compounds: nobody's contribution
+ * is ignored, and no amount of them can black out the world.
+ */
+const MAX_WEIGHT = 1.6;
+
+/**
+ * How hard a clear zone pushes weather back toward calm.
+ *
+ * Above 1 so that clearing at full intensity beats a single storm of equal
+ * strength standing on the same spot — otherwise pressing Clear inside a storm
+ * would leave it half-storming, which reads as broken. Someone who wants the
+ * storm back can summon it again; the row was never deleted.
+ */
+const CLEAR_AUTHORITY = 1.35;
+
 /** A weather contribution with its payload resolved. */
 export type WeatherContribution = Contribution<WeatherPayload>;
 
@@ -96,6 +120,11 @@ export function sampleInto(
   let fog = 0;
   let glow = 0;
 
+  // Clearing weight accumulates separately — it isn't weather, it's the
+  // absence of it, and it has to be known in full before it can cancel
+  // anything. Gathering both in one pass is what lets a single loop stay.
+  let clearWeight = 0;
+
   for (let i = 0; i < zones.length; i++) {
     const zone = zones[i];
     const payload = zone.payload;
@@ -114,7 +143,16 @@ export function sampleInto(
     const weight = falloff(distSq, radius) * Math.max(0, Math.min(1, payload.intensity));
     if (weight <= 0) continue;
 
-    const a = conditionFor(payload.condition).atmosphere;
+    const condition = conditionFor(payload.condition);
+
+    // A clearing zone contributes no weather of its own; it earns the right to
+    // cancel what others contributed.
+    if (condition.clears) {
+      clearWeight += weight * CLEAR_AUTHORITY;
+      continue;
+    }
+
+    const a = condition.atmosphere;
 
     rain += a.rain * weight;
     snow += a.snow * weight;
@@ -131,6 +169,46 @@ export function sampleInto(
   }
 
   if (weightSum <= 0) return out;
+
+  // Clearing cancels weather proportionally: `calm` is how much of what the
+  // zones asked for actually survives. Scaling the accumulators rather than
+  // lerping the finished atmosphere keeps everything downstream — including
+  // the weighted averages, which divide by weightSum — internally consistent.
+  if (clearWeight > 0) {
+    const calm = Math.max(0, 1 - clearWeight / weightSum);
+    if (calm <= 0.001) return out; // fully cleared: the baseline already in `out`
+    rain *= calm;
+    snow *= calm;
+    fog *= calm;
+    glow *= calm;
+    tintR *= calm;
+    tintG *= calm;
+    tintB *= calm;
+    gloomSum *= calm;
+    windSum *= calm;
+    cloudSum *= calm;
+    weightSum *= calm;
+  }
+
+  // Bound the pile-up before it reaches any of the outputs. Overlapping zones
+  // still deepen the weather, but with diminishing returns instead of a linear
+  // climb — three storms on one spot used to sum to a weight near 3, which is
+  // how the world ended up black. Scaling every accumulator by the same factor
+  // preserves the mix between conditions; only the total is capped.
+  if (weightSum > MAX_WEIGHT) {
+    const scale = MAX_WEIGHT / weightSum;
+    rain *= scale;
+    snow *= scale;
+    fog *= scale;
+    glow *= scale;
+    tintR *= scale;
+    tintG *= scale;
+    tintB *= scale;
+    gloomSum *= scale;
+    windSum *= scale;
+    cloudSum *= scale;
+    weightSum = MAX_WEIGHT;
+  }
 
   // Additive, then clamped. Stacking five storms should saturate, not overflow
   // into NaN territory downstream in the shaders.

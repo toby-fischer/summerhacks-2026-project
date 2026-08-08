@@ -357,20 +357,56 @@ function Walker({
     }
   });
 
-  // Chrome refuses a re-lock within ~1s of Esc and fires `pointerlockerror`.
-  // The next click succeeds, so nothing is actually broken — but three logs it
-  // via console.error, and a red error in the console during judging reads as a
-  // broken app. Swallow just this one message and leave every other error alone.
+  // Chrome rejects a pointer-lock request in three situations that are all
+  // recoverable — the very next click succeeds — but each one surfaces as a
+  // red console error, and a console full of errors during judging reads as a
+  // broken app:
+  //
+  //   "Unable to use Pointer Lock API"  three logs this via console.error
+  //   SecurityError                     re-locking within ~1s of pressing Esc
+  //   WrongDocumentError                locking while the document is swapping,
+  //                                     i.e. every hot reload in development
+  //
+  // The last two arrive as unhandled promise rejections rather than through
+  // console.error, which is why catching console.error alone missed them.
+  //
+  // Matched narrowly on purpose: anything that isn't one of these three still
+  // reaches the console, because a real error hidden here would cost far more
+  // than the noise this removes.
   useEffect(() => {
+    // Lowercased before matching: Chrome writes "Pointer lock" in one of these
+    // and "pointer lock" in another, and a case-sensitive test silently misses
+    // whichever one it wasn't written against.
+    const isPointerLockNoise = (v: unknown): boolean => {
+      const raw =
+        typeof v === 'string'
+          ? v
+          : v instanceof Error
+            ? `${v.name}: ${v.message}`
+            : '';
+      const msg = raw.toLowerCase();
+      if (!msg.includes('pointer lock') && !msg.includes('pointerlock')) return false;
+      return (
+        msg.includes('unable to use pointer lock api') ||
+        msg.includes('exited the lock') ||
+        msg.includes('root document of this element is not valid')
+      );
+    };
+
     const original = console.error;
     console.error = (...args: unknown[]) => {
-      if (typeof args[0] === 'string' && args[0].includes('Unable to use Pointer Lock API')) {
-        return;
-      }
+      if (isPointerLockNoise(args[0])) return;
       original(...args);
     };
+
+    const onRejection = (e: PromiseRejectionEvent) => {
+      if (isPointerLockNoise(e.reason)) e.preventDefault();
+    };
+    window.addEventListener('unhandledrejection', onRejection);
+
     return () => {
       console.error = original;
+      window.removeEventListener('unhandledrejection', onRejection);
     };
   }, []);
 
@@ -1091,42 +1127,76 @@ function WeatherPanel({
   const [intensity, setIntensity] = useState(0.85);
   const [radius, setRadius] = useState(260);
 
+  // Clearing reuses the same panel, but "intensity" means how firmly the sky
+  // is calmed rather than how hard it rains, so the labels change with it.
+  const clearing = CONDITIONS[condition]?.clears === true;
+
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm">
       <div className="max-h-[92vh] w-full max-w-md overflow-y-auto rounded-xl border border-white/10 bg-neutral-900 p-6">
-        <h2 className="text-lg font-semibold text-white">Summon weather here</h2>
+        <h2 className="text-lg font-semibold text-white">
+          {clearing ? 'Clear the sky here' : 'Summon weather here'}
+        </h2>
         <p className="mt-1 text-sm text-white/60">
-          It blends with whatever else is nearby — nothing gets overwritten.
+          {clearing
+            ? 'Calms the weather around this spot. Nobody loses their storm — it still runs everywhere else.'
+            : 'It blends with whatever else is nearby — nothing gets overwritten.'}
         </p>
 
+        {/* Clearing is separated from summoning because it is the one choice
+            that takes weather away rather than adding it — grouped in with the
+            storms it reads as another kind of sky, and people press it
+            expecting an off switch for the whole world. */}
         <div className="mt-4 flex flex-wrap gap-2">
-          {Object.values(CONDITIONS).map((c) => {
+          {Object.values(CONDITIONS)
+            .filter((c) => !c.clears)
+            .map((c) => {
+              const active = c.name === condition;
+              const t = c.atmosphere.tint;
+              const swatch = `rgb(${Math.round(t[0] * 255)}, ${Math.round(t[1] * 255)}, ${Math.round(t[2] * 255)})`;
+              return (
+                <button
+                  key={c.name}
+                  onClick={() => setCondition(c.name)}
+                  aria-pressed={active}
+                  className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition ${
+                    active
+                      ? 'border-sky-400 bg-sky-400/15 text-white'
+                      : 'border-white/15 text-white/70 hover:bg-white/10'
+                  }`}
+                >
+                  <span
+                    className="h-3 w-3 rounded-full border border-black/30"
+                    style={{ background: swatch }}
+                  />
+                  {c.label}
+                </button>
+              );
+            })}
+        </div>
+
+        {Object.values(CONDITIONS)
+          .filter((c) => c.clears)
+          .map((c) => {
             const active = c.name === condition;
-            const t = c.atmosphere.tint;
-            const swatch = `rgb(${Math.round(t[0] * 255)}, ${Math.round(t[1] * 255)}, ${Math.round(t[2] * 255)})`;
             return (
               <button
                 key={c.name}
                 onClick={() => setCondition(c.name)}
                 aria-pressed={active}
-                className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition ${
+                className={`mt-3 flex w-full items-center justify-center gap-2 rounded-md border px-3 py-2 text-xs transition ${
                   active
-                    ? 'border-sky-400 bg-sky-400/15 text-white'
-                    : 'border-white/15 text-white/70 hover:bg-white/10'
+                    ? 'border-amber-400 bg-amber-400/15 text-white'
+                    : 'border-white/15 text-white/60 hover:bg-white/10'
                 }`}
               >
-                <span
-                  className="h-3 w-3 rounded-full border border-black/30"
-                  style={{ background: swatch }}
-                />
-                {c.label}
+                ☀ {c.label}
               </button>
             );
           })}
-        </div>
 
         <label className="mt-5 block text-xs font-medium tracking-wide text-white/50 uppercase">
-          Intensity · {Math.round(intensity * 100)}%
+          {clearing ? 'Strength' : 'Intensity'} · {Math.round(intensity * 100)}%
         </label>
         <input
           type="range"
@@ -1160,9 +1230,11 @@ function WeatherPanel({
           </button>
           <button
             onClick={() => onCommit(condition, intensity, radius)}
-            className="rounded-md bg-sky-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-sky-400"
+            className={`rounded-md px-5 py-2 text-sm font-medium text-neutral-950 transition ${
+              clearing ? 'bg-amber-400 hover:bg-amber-300' : 'bg-sky-500 hover:bg-sky-400'
+            }`}
           >
-            Summon it
+            {clearing ? 'Clear it' : 'Summon it'}
           </button>
         </div>
       </div>

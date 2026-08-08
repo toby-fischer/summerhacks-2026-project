@@ -45,6 +45,22 @@ export interface WeatherCondition {
   label: string;
   /** What this condition contributes at full intensity. */
   atmosphere: Atmosphere;
+  /**
+   * Marks a condition that CLEARS weather rather than adding it.
+   *
+   * Everything else in this file is additive, per the contract: contributions
+   * accumulate and nobody's work can be erased. That rule is right for terrain
+   * and creatures, which are objects someone made — but applied to weather it
+   * produced a world that could only ever get darker, because a "clear" preset
+   * whose atmosphere equals the baseline contributes exactly nothing. The
+   * button existed and did nothing, and a storm was permanent.
+   *
+   * So clearing is a first-class operation instead of a preset that happens to
+   * be a no-op. It doesn't delete anyone's row — every zone stays in the
+   * database and keeps working elsewhere in the world. It just says "here, the
+   * sky is calm", and the sampler weighs it against the storms overhead.
+   */
+  clears?: boolean;
 }
 
 /** Clear sky is the world's resting state, and the base every blend starts from. */
@@ -64,8 +80,12 @@ export const CLEAR: Atmosphere = {
 export const CONDITIONS: Record<string, WeatherCondition> = {
   clear: {
     name: 'clear',
-    label: 'Clear',
+    label: 'Clear the sky',
+    // The one condition that subtracts. Its atmosphere IS the baseline, so as
+    // an additive contribution it was worth nothing; `clears` is what gives it
+    // teeth. See the flag's documentation above.
     atmosphere: { ...CLEAR },
+    clears: true,
   },
 
   rain: {
@@ -134,8 +154,14 @@ export const CONDITIONS: Record<string, WeatherCondition> = {
       fog: 0.82,
       cloud: 1,
       wind: 12,
-      gloom: 1,
-      tint: [0.1, 0.12, 0.17],
+      // Was 1.0, which drained the sun to 28% and left the terrain colourless.
+      // A storm should be oppressive, not unlit — at 0.85 the world still has
+      // form and colour, it has just lost the sun.
+      gloom: 0.85,
+      // Was [0.1, 0.12, 0.17] — nearly black before anything blended, so two
+      // overlapping storms read as a cave rather than as bad weather. This is
+      // still the darkest tint in the set by a wide margin.
+      tint: [0.17, 0.2, 0.26],
       glow: 0.12,
     },
   },
