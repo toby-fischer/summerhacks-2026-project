@@ -50,6 +50,7 @@ import {
 } from './presence';
 import {
   normalizeCondition,
+  type SkyCloudAsset,
   type WeatherAsset,
 } from './weather';
 import { WeatherSystem } from './WeatherFX';
@@ -57,7 +58,7 @@ import {
   createVegetationPatches,
   VegetationLayer,
   VegetationPanel,
-  type VegetationPatch,
+  type VegetationAsset,
 } from './vegetation';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -226,6 +227,23 @@ function hash01(seed: string, salt = 0): number {
 
 /* -------------------------------------------------------------- terrain --- */
 
+/** Feather patch rims to zero so landforms blend into the plain — must run
+ *  before groundAt / vegetation sample heights, or plants float above the mesh. */
+function featherTerrainEdge(terrain: TerrainData) {
+  const { size, scale, heights } = terrain;
+  const half = scale / 2;
+  for (let iy = 0; iy < size; iy++) {
+    for (let ix = 0; ix < size; ix++) {
+      const i = iy * size + ix;
+      const x = (ix / (size - 1)) * scale - half;
+      const z = (iy / (size - 1)) * scale - half;
+      const edge = Math.max(Math.abs(x), Math.abs(z)) / half;
+      const falloff = 1 - THREE.MathUtils.smoothstep(edge, 0.6, 1);
+      heights[i] = (heights[i] ?? 0) * falloff;
+    }
+  }
+}
+
 function PatchMesh({ patch, terrain }: { patch: Patch; terrain: TerrainData }) {
   const geometry = useMemo(() => {
     const g = new THREE.PlaneGeometry(
@@ -245,16 +263,9 @@ function PatchMesh({ patch, terrain }: { patch: Patch; terrain: TerrainData }) {
     const snow = new THREE.Color('#e8eef7');
     const c = new THREE.Color();
 
-    const half = terrain.scale / 2;
     for (let i = 0; i < pos.count; i++) {
-      // Feather the rim to zero so a patch blends into the plain instead of
-      // ending on a 60m cliff.
-      const edge = Math.max(Math.abs(pos.getX(i)), Math.abs(pos.getZ(i))) / half;
-      const falloff = 1 - THREE.MathUtils.smoothstep(edge, 0.6, 1);
-
-      const h = (terrain.heights[i] ?? 0) * falloff;
+      const h = terrain.heights[i] ?? 0;
       pos.setY(i, h);
-      terrain.heights[i] = h;
 
       const t = h / terrain.maxHeight;
       if (t < 0.12) c.copy(sand).lerp(grass, t / 0.12);
@@ -2035,6 +2046,7 @@ function Walker({
   selfId,
   onOpenDraw,
   onOpenAnimalDraw,
+  onOpenWeather,
   onOpenVegetation,
   isModalOpen,
 }: {
@@ -2052,6 +2064,7 @@ function Walker({
   selfId: string;
   onOpenDraw: (x: number, z: number) => void;
   onOpenAnimalDraw: (x: number, z: number) => void;
+  onOpenWeather: (x: number, z: number) => void;
   onOpenVegetation: (x: number, z: number) => void;
   isModalOpen: boolean;
 }) {
@@ -2110,6 +2123,11 @@ function Walker({
           document.exitPointerLock();
           const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
           onOpenAnimalDraw(x, z);
+        } else if (e.code === 'KeyT' && !interiorRef.current) {
+          e.preventDefault();
+          document.exitPointerLock();
+          const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
+          onOpenWeather(x, z);
         } else if (e.code === 'KeyF' && !interiorRef.current) {
           e.preventDefault();
           document.exitPointerLock();
@@ -2129,7 +2147,7 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw, onOpenAnimalDraw, onOpenVegetation, isModalOpen]);
+  }, [camera, onOpenDraw, onOpenAnimalDraw, onOpenWeather, onOpenVegetation, isModalOpen]);
 
   useFrame((_, delta) => {
     if (isModalOpen) return;
@@ -2338,11 +2356,13 @@ export default function World() {
   const [buildings, setBuildings] = useState<BuildingAsset[]>([]);
   const [animals, setAnimals] = useState<AnimalData[]>([]);
   const [weathers, setWeathers] = useState<WeatherAsset[]>([]);
+  const [skyClouds, setSkyClouds] = useState<SkyCloudAsset[]>([]);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [animalDrawAt, setAnimalDrawAt] = useState<{ x: number; z: number } | null>(null);
+  const [skyDrawAt, setSkyDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [vegetationAt, setVegetationAt] = useState<{ x: number; z: number } | null>(null);
-  const [vegetationPatches, setVegetationPatches] = useState<VegetationPatch[]>([]);
+  const [vegetationAssets, setVegetationAssets] = useState<VegetationAsset[]>([]);
   const [interior, setInterior] = useState<ActiveInterior | null>(null);
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
@@ -2367,6 +2387,7 @@ export default function World() {
       let terrain = cache.current.get(patch.id);
       if (!terrain) {
         terrain = terrainFor(patch);
+        featherTerrainEdge(terrain);
         cache.current.set(patch.id, terrain);
       }
       return { patch, terrain };
@@ -2381,6 +2402,17 @@ export default function World() {
     () => buildingLayouts.flatMap(({ layout }) => exteriorWallFootprints(layout)),
     [buildingLayouts],
   );
+  const vegetationPatches = useMemo(() => {
+    const ground = (wx: number, wz: number) => groundAt(built, wx, wz);
+    return vegetationAssets.flatMap((asset) =>
+      createVegetationPatches(ground, asset.x, asset.z, asset.selection, asset.seed).map(
+        (patch, index) => ({
+          ...patch,
+          id: `${asset.id}:${patch.type}:${index}`,
+        }),
+      ),
+    );
+  }, [vegetationAssets, built]);
 
   // Floorplans/furniture are pure functions of (building id, floor), so once
   // generated they're cached forever rather than regenerated on every visit.
@@ -2483,6 +2515,25 @@ export default function World() {
         radius: typeof props.radius === 'number' ? props.radius : 260,
       };
     };
+    const toSkyCloud = (r: Record<string, unknown>): SkyCloudAsset | null => {
+      if (r.type !== 'sky_cloud') return null;
+      const props = (r.properties ?? {}) as Record<string, unknown>;
+      if (typeof props.sketch !== 'string') return null;
+      return { id: String(r.id), x: Number(r.x) || 0, z: Number(r.z) || 0, sketch: props.sketch };
+    };
+    const toVegetation = (r: Record<string, unknown>): VegetationAsset | null => {
+      if (r.type !== 'vegetation') return null;
+      const props = (r.properties ?? {}) as Record<string, unknown>;
+      if (typeof props.selection !== 'string' || !props.selection.trim()) return null;
+      return {
+        id: String(r.id),
+        x: Number(r.x) || 0,
+        z: Number(r.z) || 0,
+        selection: props.selection.trim(),
+        seed: Number(props.seed) || 1337,
+      };
+    };
+
     supabase
       .from('world_assets')
       .select('*')
@@ -2520,6 +2571,22 @@ export default function World() {
           }
           return [...byId.values()];
         });
+        setSkyClouds((prev) => {
+          const byId = new Map(prev.map((c) => [c.id, c]));
+          for (const row of data) {
+            const c = toSkyCloud(row as Record<string, unknown>);
+            if (c) byId.set(c.id, c);
+          }
+          return [...byId.values()];
+        });
+        setVegetationAssets((prev) => {
+          const byId = new Map(prev.map((v) => [v.id, v]));
+          for (const row of data) {
+            const v = toVegetation(row as Record<string, unknown>);
+            if (v) byId.set(v.id, v);
+          }
+          return [...byId.values()];
+        });
       });
 
     const channel = supabase
@@ -2544,6 +2611,28 @@ export default function World() {
           const w = toWeather(row);
           if (w) {
             setWeathers((prev) => (prev.some((q) => q.id === w.id) ? prev : [...prev, w]));
+          }
+          const sc = toSkyCloud(row);
+          if (sc) {
+            setSkyClouds((prev) => (prev.some((q) => q.id === sc.id) ? prev : [...prev, sc]));
+          }
+          const v = toVegetation(row);
+          if (v) {
+            setVegetationAssets((prev) => {
+              if (prev.some((q) => q.id === v.id)) return prev;
+              // Drop the matching optimistic temp once the server row arrives.
+              const withoutTemp = prev.filter(
+                (q) =>
+                  !(
+                    q.id.startsWith('temp-vegetation-') &&
+                    q.selection === v.selection &&
+                    q.seed === v.seed &&
+                    Math.abs(q.x - v.x) < 0.01 &&
+                    Math.abs(q.z - v.z) < 0.01
+                  ),
+              );
+              return [...withoutTemp, v];
+            });
           }
         },
       )
@@ -2727,20 +2816,76 @@ export default function World() {
     [],
   );
 
-  const plantVegetation = useCallback(
-    (selection: string, x: number, z: number) => {
-      if (!selection.trim()) return;
-      const next = createVegetationPatches(
-        (wx, wz) => groundAt(built, wx, wz),
+  /* -------- contribute drawn clouds -------- */
+  const commitSkySketch = useCallback((grid: Float32Array, x: number, z: number) => {
+    const sketch = encodeSketch(grid);
+    const tempId = `temp-sky_cloud-${Math.random() * 1e9}`;
+    setSkyClouds((prev) => [...prev, { id: tempId, x, z, sketch }]);
+    setSkyDrawAt(null);
+
+    if (!supabase) return;
+
+    supabase
+      .from('world_assets')
+      .insert({
         x,
         z,
-        selection.trim(),
-      );
-      setVegetationPatches((prev) => [...prev, ...next]);
-      setVegetationAt(null);
-    },
-    [built],
-  );
+        type: 'sky_cloud',
+        color: '#e8eef5',
+        properties: { sketch },
+      })
+      .select()
+      .then(({ data, error }) => {
+        setSkyClouds((prev) => {
+          const without = prev.filter((c) => c.id !== tempId);
+          if (error || !data?.length) return without;
+          const id = String((data[0] as Record<string, unknown>).id);
+          return without.some((c) => c.id === id) ? without : [...without, { id, x, z, sketch }];
+        });
+      });
+  }, []);
+
+  const plantVegetation = useCallback((selection: string, x: number, z: number) => {
+    if (!selection.trim()) return;
+    const sel = selection.trim();
+    const seed = Math.floor(Math.random() * 1e9);
+    const tempId = `temp-vegetation-${seed}`;
+    const asset: VegetationAsset = { id: tempId, x, z, selection: sel, seed };
+
+    setVegetationAssets((prev) => [...prev, asset]);
+    setVegetationAt(null);
+
+    if (!supabase) return;
+
+    supabase
+      .from('world_assets')
+      .insert({
+        x,
+        z,
+        type: 'vegetation',
+        color: '#568544',
+        properties: { selection: sel, seed },
+      })
+      .select()
+      .then(({ data, error }) => {
+        if (error) {
+          console.warn('vegetation insert failed; keeping local planting', error.message);
+          return;
+        }
+        const row = data?.[0] as Record<string, unknown> | undefined;
+        if (!row) {
+          // Insert may still land via realtime; keep the optimistic row.
+          return;
+        }
+        const id = String(row.id);
+        setVegetationAssets((prev) => {
+          const without = prev.filter((v) => v.id !== tempId);
+          return without.some((v) => v.id === id)
+            ? without
+            : [...without, { id, x, z, selection: sel, seed }];
+        });
+      });
+  }, []);
 
   const label =
     status === 'live'
@@ -2749,7 +2894,11 @@ export default function World() {
         ? 'connecting…'
         : 'offline — solo world';
 
-  const isModalOpen = drawAt !== null || vegetationAt !== null || (animalDrawAt !== null && !isRecordingPath);
+  const isModalOpen =
+    drawAt !== null ||
+    skyDrawAt !== null ||
+    vegetationAt !== null ||
+    (animalDrawAt !== null && !isRecordingPath);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
@@ -2761,7 +2910,7 @@ export default function World() {
           scene.fog = new THREE.FogExp2('#c8daf0', 0.0012);
         }}
       >
-        <WeatherSystem assets={weathers} indoors={interior !== null} />
+        <WeatherSystem assets={weathers} skyClouds={skyClouds} indoors={interior !== null} />
 
         <Plain />
         {built.map(({ patch, terrain }) => (
@@ -2817,6 +2966,7 @@ export default function World() {
             setRecordedPath(null);
             setIsRecordingPath(false);
           }}
+          onOpenWeather={(x, z) => setSkyDrawAt({ x, z })}
           onOpenVegetation={(x, z) => setVegetationAt({ x, z })}
           isModalOpen={isModalOpen}
         />
@@ -2835,8 +2985,9 @@ export default function World() {
         <p className="mt-1 text-sm text-white/70">
           {patches.length} landform{patches.length === 1 ? '' : 's'} · {buildings.length}{' '}
           building{buildings.length === 1 ? '' : 's'} · {animals.length} animal
-          {animals.length === 1 ? '' : 's'} · {vegetationPatches.length} plant patch
-          {vegetationPatches.length === 1 ? '' : 'es'} · {label}
+          {animals.length === 1 ? '' : 's'} · {vegetationAssets.length} plant
+          {vegetationAssets.length === 1 ? '' : 's'} · {skyClouds.length} cloud
+          {skyClouds.length === 1 ? '' : 's'} · {label}
         </p>
       </div>
 
@@ -2852,6 +3003,7 @@ export default function World() {
           <p>
             <span className="text-white/85">E</span> terrain/buildings ·{' '}
             <span className="text-white/85">R</span> animal ·{' '}
+            <span className="text-white/85">T</span> draw cloud ·{' '}
             <span className="text-white/85">F</span> plant vegetation ·{' '}
             <span className="text-white/85">Esc</span> to release
           </p>
@@ -2862,6 +3014,13 @@ export default function World() {
         <DrawPanel
           onCancel={() => setDrawAt(null)}
           onCommit={(draft) => commit(draft, drawAt.x, drawAt.z)}
+        />
+      )}
+
+      {skyDrawAt && (
+        <SkyDrawPanel
+          onCancel={() => setSkyDrawAt(null)}
+          onCommit={(grid) => commitSkySketch(grid, skyDrawAt.x, skyDrawAt.z)}
         />
       )}
 
@@ -2886,6 +3045,160 @@ export default function World() {
           onPlant={(type) => plantVegetation(type, vegetationAt.x, vegetationAt.z)}
         />
       )}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------- sky draw panel --- */
+
+function SkyDrawPanel({
+  onCommit,
+  onCancel,
+}: {
+  onCommit: (grid: Float32Array) => void;
+  onCancel: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const drawing = useRef(false);
+  const [error, setError] = useState<string | null>(null);
+  const [markerSize, setMarkerSize] = useState(36);
+
+  const clear = useCallback(() => {
+    const ctx = canvasRef.current?.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#9eb6d4';
+    ctx.fillRect(0, 0, 512, 512);
+    setError(null);
+  }, []);
+
+  useEffect(() => {
+    clear();
+  }, [clear]);
+
+  const paint = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (!drawing.current) return;
+      const c = canvasRef.current;
+      const ctx = c?.getContext('2d');
+      if (!c || !ctx) return;
+      const r = c.getBoundingClientRect();
+      const x = ((e.clientX - r.left) / r.width) * c.width;
+      const y = ((e.clientY - r.top) / r.height) * c.height;
+
+      const g = ctx.createRadialGradient(x, y, 0, x, y, markerSize);
+      g.addColorStop(0, 'rgba(255,255,255,0.85)');
+      g.addColorStop(0.55, 'rgba(240,246,252,0.45)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, markerSize, 0, Math.PI * 2);
+      ctx.fill();
+    },
+    [markerSize],
+  );
+
+  const submit = useCallback(() => {
+    const c = canvasRef.current;
+    const ctx = c?.getContext('2d');
+    if (!c || !ctx) return;
+    const img = ctx.getImageData(0, 0, c.width, c.height);
+    const grid = new Float32Array(SKETCH_GRID * SKETCH_GRID);
+    const step = c.width / SKETCH_GRID;
+    let inkSum = 0;
+    for (let gy = 0; gy < SKETCH_GRID; gy++) {
+      for (let gx = 0; gx < SKETCH_GRID; gx++) {
+        let acc = 0;
+        let n = 0;
+        for (let y = Math.floor(gy * step); y < Math.floor((gy + 1) * step); y++) {
+          for (let x = Math.floor(gx * step); x < Math.floor((gx + 1) * step); x++) {
+            const i = (y * c.width + x) * 4;
+            const lum =
+              (0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2]) / 255;
+            const ink = Math.max(0, (lum - 0.55) / 0.45);
+            acc += ink;
+            n++;
+          }
+        }
+        const v = n ? acc / n : 0;
+        grid[gy * SKETCH_GRID + gx] = v;
+        inkSum += v;
+      }
+    }
+    if (inkSum < 8) {
+      setError('Sketch a cloud shape first.');
+      return;
+    }
+    setError(null);
+    onCommit(grid);
+  }, [onCommit]);
+
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
+        <h2 className="text-lg font-semibold text-white">Draw a cloud</h2>
+        <p className="mt-1 text-sm text-white/60">
+          Soft white strokes become a cloud hanging over this spot — others will see it in the shared sky.
+        </p>
+
+        <canvas
+          ref={canvasRef}
+          width={512}
+          height={512}
+          className="mt-4 aspect-square w-full touch-none rounded-lg border border-white/10"
+          onPointerDown={(e) => {
+            drawing.current = true;
+            (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+            paint(e);
+          }}
+          onPointerMove={paint}
+          onPointerUp={() => {
+            drawing.current = false;
+          }}
+          onPointerLeave={() => {
+            drawing.current = false;
+          }}
+        />
+
+        <div className="mt-3 flex items-center gap-3 text-sm text-white/70">
+          <label className="flex flex-1 items-center gap-2">
+            Brush
+            <input
+              type="range"
+              min={16}
+              max={64}
+              value={markerSize}
+              onChange={(e) => setMarkerSize(Number(e.target.value))}
+              className="flex-1"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={clear}
+            className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10"
+          >
+            Clear
+          </button>
+        </div>
+
+        {error && <p className="mt-2 text-sm text-rose-300">{error}</p>}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md px-3 py-1.5 text-sm text-white/70 hover:bg-white/10"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            className="rounded-md bg-sky-300 px-3 py-1.5 text-sm font-medium text-neutral-950 hover:bg-sky-200"
+          >
+            Place cloud
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

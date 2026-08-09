@@ -14,7 +14,7 @@ const CACHE_TTL_MS = 3 * 60 * 1000;
 let cache: { signature: string; note: string; expires: number } | null = null;
 
 function buildPrompt(facts: unknown): string {
-  return `You analyze usage data for Infinite Terra, a shared world where users add terrain, buildings, animals, weather cells, and drawn clouds.
+  return `You analyze usage data for Infinite Terra, a shared world where users add terrain, buildings, animals, weather cells, vegetation, and drawn clouds.
 
 Given this JSON summary, return ONE short insight. Prefer comparing themes, mood labels, recent pace vs average, densest spots, or what type dominates.
 

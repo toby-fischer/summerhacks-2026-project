@@ -15,9 +15,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
@@ -79,6 +76,7 @@ const TYPE_COLORS: Record<string, string> = {
   building: '#c9a86a',
   animal: '#e8935a',
   weather: '#6dd3c8',
+  vegetation: '#568544',
   sky_cloud: '#c8d4e0',
   creature: '#b98ee8',
 };
@@ -90,6 +88,7 @@ const TYPE_LABELS: Record<string, string> = {
   building: 'Building',
   animal: 'Animal',
   weather: 'Weather',
+  vegetation: 'Vegetation',
   sky_cloud: 'Cloud',
   creature: 'Creature',
 };
@@ -417,6 +416,7 @@ export default function Dashboard() {
   const weatherThemes = useMemo(() => weatherConditionCounts(rows), [rows]);
   const buildings = useMemo(() => buildingCharacter(rows), [rows]);
   const skyCloudCount = allTypeCounts.sky_cloud ?? 0;
+  const vegetationCount = allTypeCounts.vegetation ?? 0;
   const themesNote = useMemo(
     () => themeInsight(allTypeCounts, weatherThemes, skyCloudCount),
     [allTypeCounts, weatherThemes, skyCloudCount],
@@ -648,28 +648,45 @@ export default function Dashboard() {
             </Section>
 
             <Section title="Mix">
-              <div className="h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Tooltip {...tooltipStyle} />
-                    <Pie
-                      data={pieData.filter((d) => !hiddenTypes.has(d.type))}
-                      dataKey="value"
-                      nameKey="name"
-                      innerRadius={40}
-                      outerRadius={70}
-                      paddingAngle={2}
-                      stroke="#000"
-                    >
-                      {pieData
-                        .filter((d) => !hiddenTypes.has(d.type))
-                        .map((d) => (
-                          <Cell key={d.type} fill={typeColor(d.type)} />
-                        ))}
-                    </Pie>
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
+              {pieData.length === 0 ? (
+                <p className="text-sm text-white/40">Nothing in this time range yet.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {pieData
+                    .filter((d) => !hiddenTypes.has(d.type) && d.value > 0)
+                    .map((d) => {
+                      const max = Math.max(1, ...pieData.map((p) => p.value));
+                      return (
+                        <li key={d.type}>
+                          <div className="mb-1 flex justify-between text-sm text-white/70">
+                            <span className="inline-flex items-center gap-1.5">
+                              <span
+                                className="inline-block h-2 w-2"
+                                style={{ background: typeColor(d.type) }}
+                              />
+                              {d.name}
+                            </span>
+                            <span className="text-white/40">
+                              {d.value}
+                              <span className="ml-2 text-white/30">
+                                {Math.round((d.value / Math.max(1, scopedRows.length)) * 100)}%
+                              </span>
+                            </span>
+                          </div>
+                          <div className="h-1.5 w-full bg-white/10">
+                            <div
+                              className="h-full"
+                              style={{
+                                width: `${(d.value / max) * 100}%`,
+                                background: typeColor(d.type),
+                              }}
+                            />
+                          </div>
+                        </li>
+                      );
+                    })}
+                </ul>
+              )}
               <TypeLegend
                 types={types}
                 counts={typeCounts}
@@ -755,7 +772,7 @@ export default function Dashboard() {
 
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-2 lg:gap-12">
             <Section title="Themes">
-              {weatherThemes.length === 0 && !buildings && skyCloudCount === 0 ? (
+              {weatherThemes.length === 0 && !buildings && skyCloudCount === 0 && vegetationCount === 0 ? (
                 <p className="text-sm text-white/40">Nothing themed yet.</p>
               ) : (
                 <div className="space-y-5">
@@ -778,6 +795,11 @@ export default function Dashboard() {
                         color="#c9a86a"
                       />
                     </div>
+                  )}
+                  {vegetationCount > 0 && (
+                    <p className="text-sm text-white/70">
+                      {vegetationCount} vegetation planting{vegetationCount === 1 ? '' : 's'}
+                    </p>
                   )}
                   {skyCloudCount > 0 && (
                     <p className="text-sm text-white/70">
