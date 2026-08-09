@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { PointerLockControls, Sky, Stars } from '@react-three/drei';
+import { PointerLockControls } from '@react-three/drei';
 import { createClient } from '@supabase/supabase-js';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import * as THREE from 'three';
@@ -48,6 +48,14 @@ import {
   sendMove,
   type Traveller,
 } from './presence';
+import {
+  normalizeCondition,
+  WEATHER_CONDITIONS,
+  WEATHER_LABELS,
+  type WeatherAsset,
+  type WeatherCondition,
+} from './weather';
+import { WeatherSystem } from './WeatherFX';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
@@ -2023,6 +2031,7 @@ function Walker({
   selfId,
   onOpenDraw,
   onOpenAnimalDraw,
+  onOpenWeather,
   isModalOpen,
 }: {
   built: { patch: Patch; terrain: TerrainData }[];
@@ -2039,6 +2048,7 @@ function Walker({
   selfId: string;
   onOpenDraw: (x: number, z: number) => void;
   onOpenAnimalDraw: (x: number, z: number) => void;
+  onOpenWeather: (x: number, z: number) => void;
   isModalOpen: boolean;
 }) {
   const { camera } = useThree();
@@ -2096,6 +2106,11 @@ function Walker({
           document.exitPointerLock();
           const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
           onOpenAnimalDraw(x, z);
+        } else if (e.code === 'KeyT' && !interiorRef.current) {
+          e.preventDefault();
+          document.exitPointerLock();
+          const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
+          onOpenWeather(x, z);
         }
       }
     };
@@ -2110,7 +2125,7 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw, onOpenAnimalDraw, isModalOpen]);
+  }, [camera, onOpenDraw, onOpenAnimalDraw, onOpenWeather, isModalOpen]);
 
   useFrame((_, delta) => {
     if (isModalOpen) return;
@@ -2291,9 +2306,11 @@ export default function World() {
   const [patches, setPatches] = useState<Patch[]>([]);
   const [buildings, setBuildings] = useState<BuildingAsset[]>([]);
   const [animals, setAnimals] = useState<AnimalData[]>([]);
+  const [weathers, setWeathers] = useState<WeatherAsset[]>([]);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [animalDrawAt, setAnimalDrawAt] = useState<{ x: number; z: number } | null>(null);
+  const [weatherAt, setWeatherAt] = useState<{ x: number; z: number } | null>(null);
   const [interior, setInterior] = useState<ActiveInterior | null>(null);
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
@@ -2420,6 +2437,20 @@ export default function World() {
         speed: typeof props.speed === 'number' ? props.speed : undefined, // Add this line
       };
     };
+    const toWeather = (r: Record<string, unknown>): WeatherAsset | null => {
+      if (r.type !== 'weather') return null;
+      const props = (r.properties ?? {}) as Record<string, unknown>;
+      const condition = normalizeCondition(props.condition);
+      if (!condition) return null;
+      return {
+        id: String(r.id),
+        x: Number(r.x) || 0,
+        z: Number(r.z) || 0,
+        condition,
+        intensity: typeof props.intensity === 'number' ? props.intensity : 0.85,
+        radius: typeof props.radius === 'number' ? props.radius : 260,
+      };
+    };
 
     supabase
       .from('world_assets')
@@ -2450,6 +2481,14 @@ export default function World() {
           }
           return [...byId.values()];
         });
+        setWeathers((prev) => {
+          const byId = new Map(prev.map((w) => [w.id, w]));
+          for (const row of data) {
+            const w = toWeather(row as Record<string, unknown>);
+            if (w) byId.set(w.id, w);
+          }
+          return [...byId.values()];
+        });
       });
 
     const channel = supabase
@@ -2470,6 +2509,10 @@ export default function World() {
           const a = toAnimal(row);
           if (a) {
             setAnimals((prev) => (prev.some((q) => q.id === a.id) ? prev : [...prev, a]));
+          }
+          const w = toWeather(row);
+          if (w) {
+            setWeathers((prev) => (prev.some((q) => q.id === w.id) ? prev : [...prev, w]));
           }
         },
       )
@@ -2653,6 +2696,49 @@ export default function World() {
     [],
   );
 
+  /* -------- contribute weather -------- */
+  const commitWeather = useCallback((condition: WeatherCondition, x: number, z: number) => {
+    const intensity = 0.85;
+    const radius = 260;
+    const tempId = `temp-weather-${Math.random() * 1e9}`;
+    setWeathers((prev) => [...prev, { id: tempId, x, z, condition, intensity, radius }]);
+    setWeatherAt(null);
+
+    if (!supabase) return;
+
+    supabase
+      .from('world_assets')
+      .insert({
+        x,
+        z,
+        type: 'weather',
+        color: '#6dd3c8',
+        properties: { condition, intensity, radius },
+      })
+      .select()
+      .then(({ data, error }) => {
+        setWeathers((prev) => {
+          const without = prev.filter((w) => w.id !== tempId);
+          if (error || !data?.length) return without;
+          const row = data[0] as Record<string, unknown>;
+          const props = (row.properties ?? {}) as Record<string, unknown>;
+          const id = String(row.id);
+          if (without.some((w) => w.id === id)) return without;
+          return [
+            ...without,
+            {
+              id,
+              x: Number(row.x) || x,
+              z: Number(row.z) || z,
+              condition: normalizeCondition(props.condition) ?? condition,
+              intensity: typeof props.intensity === 'number' ? props.intensity : intensity,
+              radius: typeof props.radius === 'number' ? props.radius : radius,
+            },
+          ];
+        });
+      });
+  }, []);
+
   const label =
     status === 'live'
       ? `${travellers.length} traveller${travellers.length === 1 ? '' : 's'} nearby`
@@ -2660,7 +2746,7 @@ export default function World() {
         ? 'connecting…'
         : 'offline — solo world';
 
-  const isModalOpen = drawAt !== null || (animalDrawAt !== null && !isRecordingPath);
+  const isModalOpen = drawAt !== null || weatherAt !== null || (animalDrawAt !== null && !isRecordingPath);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
@@ -2672,10 +2758,7 @@ export default function World() {
           scene.fog = new THREE.FogExp2('#b9c6d6', 0.0022);
         }}
       >
-        <Sky sunPosition={[90, 25, -120]} turbidity={7} rayleigh={2.4} />
-        <Stars radius={500} depth={70} count={700} factor={4} fade />
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[120, 190, -70]} intensity={2.0} color="#fff3e2" castShadow />
+        <WeatherSystem assets={weathers} indoors={interior !== null} />
 
         <Plain />
         {built.map(({ patch, terrain }) => (
@@ -2730,6 +2813,7 @@ export default function World() {
             setRecordedPath(null);
             setIsRecordingPath(false);
           }}
+          onOpenWeather={(x, z) => setWeatherAt({ x, z })}
           isModalOpen={isModalOpen}
         />
       </Canvas>
@@ -2746,8 +2830,9 @@ export default function World() {
         </div>
         <p className="mt-1 text-sm text-white/70">
           {patches.length} landform{patches.length === 1 ? '' : 's'} · {buildings.length}{' '}
-          building{buildings.length === 1 ? '' : 's'} · {animals.length} animal{animals.length === 1 ? '' : 's'} ·{' '}
-          {label}
+          building{buildings.length === 1 ? '' : 's'} · {animals.length} animal
+          {animals.length === 1 ? '' : 's'} · {weathers.length} weather cell
+          {weathers.length === 1 ? '' : 's'} · {label}
         </p>
       </div>
 
@@ -2761,8 +2846,9 @@ export default function World() {
           <p>Floor {interior.floor + 1} — find the stairwell to change floors, or walk back out the door</p>
         ) : (
           <p>
-            <span className="text-white/85">E</span> to sketch terrain/buildings here · walk through a door to step
-            inside · <span className="text-white/85">R</span> to create an animal ·{' '}
+            <span className="text-white/85">E</span> terrain/buildings ·{' '}
+            <span className="text-white/85">R</span> animal ·{' '}
+            <span className="text-white/85">T</span> weather ·{' '}
             <span className="text-white/85">Esc</span> to release
           </p>
         )}
@@ -2772,6 +2858,13 @@ export default function World() {
         <DrawPanel
           onCancel={() => setDrawAt(null)}
           onCommit={(draft) => commit(draft, drawAt.x, drawAt.z)}
+        />
+      )}
+
+      {weatherAt && (
+        <WeatherPanel
+          onCancel={() => setWeatherAt(null)}
+          onCommit={(condition) => commitWeather(condition, weatherAt.x, weatherAt.z)}
         />
       )}
 
@@ -2789,6 +2882,59 @@ export default function World() {
           }
         />
       )}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------- weather panel --- */
+
+function WeatherPanel({
+  onCommit,
+  onCancel,
+}: {
+  onCommit: (condition: WeatherCondition) => void;
+  onCancel: () => void;
+}) {
+  const [condition, setCondition] = useState<WeatherCondition>('overcast');
+
+  return (
+    <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-xl border border-white/15 bg-neutral-950/95 p-5 text-white shadow-2xl">
+        <h2 className="text-lg font-semibold">Place sky here</h2>
+        <p className="mt-1 text-sm text-white/60">
+          Adds a cloudy cell (~260m) that blends with nearby cells as people walk through.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {WEATHER_CONDITIONS.map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => setCondition(c)}
+              className={`rounded-md px-3 py-1.5 text-sm ${
+                condition === c ? 'bg-sky-400 text-neutral-950' : 'bg-white/10 text-white/80 hover:bg-white/15'
+              }`}
+            >
+              {WEATHER_LABELS[c]}
+            </button>
+          ))}
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md px-3 py-1.5 text-sm text-white/70 hover:bg-white/10"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onCommit(condition)}
+            className="rounded-md bg-sky-400 px-3 py-1.5 text-sm font-medium text-neutral-950 hover:bg-sky-300"
+          >
+            Drop {WEATHER_LABELS[condition]}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
