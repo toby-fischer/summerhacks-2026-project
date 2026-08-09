@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -17,6 +17,16 @@ export interface VegetationPatch {
   id: string;
   type: string;
   instances: VegetationInstance[];
+}
+
+/** Compact shared planting — instances are regenerated from terrain + seed. */
+export interface VegetationAsset {
+  id: string;
+  x: number;
+  z: number;
+  /** Library plant type or biome key (e.g. oak, temperate-forest). */
+  selection: string;
+  seed: number;
 }
 
 const hashString = (value: string) => {
@@ -2808,8 +2818,8 @@ export const createVegetationPatch = (
   x: number,
   z: number,
   type: string,
+  seed = hashString(`${type}:${x.toFixed(2)}:${z.toFixed(2)}`),
 ): VegetationPatch => {
-  const seed = hashString(`${type}:${x.toFixed(2)}:${z.toFixed(2)}`);
   const rand = seededRandom(seed);
   const instances: VegetationInstance[] = [];
   const radius = 20;
@@ -2820,10 +2830,10 @@ export const createVegetationPatch = (
     const distance = Math.sqrt(rand()) * radius;
     const px = x + Math.cos(angle) * distance;
     const pz = z + Math.sin(angle) * distance;
-    const { normal, slope } = surfaceNormal(groundAt, px, pz);
-    if (slope > 0.25) continue;
-
+    const { normal } = surfaceNormal(groundAt, px, pz);
+    // Sit on the sampled terrain height — peaks, ridges, and flats alike.
     const height = groundAt(px, pz);
+
     const uniformScale = 0.62 + rand() * 0.78;
 
     // Non-uniform scale prevents the forest from looking like copies of one
@@ -2876,13 +2886,13 @@ export const createVegetationPatches = (
   x: number,
   z: number,
   selection: string,
+  seed = hashString(`${selection}:${x.toFixed(2)}:${z.toFixed(2)}`),
 ): VegetationPatch[] => {
   const biome = biomeMap.get(selection);
   if (!biome) {
-    return [createVegetationPatch(groundAt, x, z, selection)];
+    return [createVegetationPatch(groundAt, x, z, selection, seed)];
   }
 
-  const seed = hashString(`${selection}:${x.toFixed(2)}:${z.toFixed(2)}`);
   const rand = seededRandom(seed);
   const instancesByType = new Map<string, VegetationInstance[]>();
   const radius = 20;
@@ -2893,10 +2903,9 @@ export const createVegetationPatches = (
     const distance = Math.sqrt(rand()) * radius;
     const px = x + Math.cos(angle) * distance;
     const pz = z + Math.sin(angle) * distance;
-    const { normal, slope } = surfaceNormal(groundAt, px, pz);
-    if (slope > 0.25) continue;
-
+    const { normal } = surfaceNormal(groundAt, px, pz);
     const height = groundAt(px, pz);
+
     const uniformScale = 0.62 + rand() * 0.78;
     const scale: [number, number, number] = [
       uniformScale * (0.88 + rand() * 0.24),
@@ -2927,6 +2936,17 @@ export const createVegetationPatches = (
 };
 
 
+const plantGeometryCache = new Map<string, THREE.BufferGeometry>();
+
+function geometryForPlant(type: string): THREE.BufferGeometry {
+  let geometry = plantGeometryCache.get(type);
+  if (!geometry) {
+    geometry = createPlantGeometry(type);
+    plantGeometryCache.set(type, geometry);
+  }
+  return geometry;
+}
+
 function PlantInstances({
   geometry,
   instances,
@@ -2936,33 +2956,48 @@ function PlantInstances({
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const dummy = useMemo(() => new THREE.Object3D(), []);
+  // Big fixed capacity so adding another planting of the same type doesn't
+  // remount the mesh (which was flashing forests out of existence).
+  const capacity = 8192;
 
-  useEffect(() => {
-    if (!meshRef.current) return;
+  useLayoutEffect(() => {
     const mesh = meshRef.current;
     if (!mesh) return;
 
-    instances.forEach((instance, index) => {
+    const count = Math.min(instances.length, capacity);
+    for (let index = 0; index < count; index++) {
+      const instance = instances[index];
       dummy.position.set(...instance.position);
 
-      // Align the plant's local Y axis with the sampled terrain normal while
-      // preserving a deterministic heading around that axis.
-      const normal = new THREE.Vector3(...instance.normal).normalize();
+      // Mostly upright even on mountain faces — full slope-align buried trunks.
       const up = new THREE.Vector3(0, 1, 0);
-      dummy.quaternion.setFromUnitVectors(up, normal);
+      const normal = new THREE.Vector3(...instance.normal).normalize();
+      const steepness = 1 - THREE.MathUtils.clamp(normal.y, 0, 1);
+      const aligned = up.clone().lerp(normal, Math.min(0.28, steepness)).normalize();
+      if (aligned.lengthSq() < 1e-8) aligned.copy(up);
+      dummy.quaternion.setFromUnitVectors(up, aligned);
       dummy.rotateY(instance.rotation);
 
       dummy.scale.set(...instance.scale);
       dummy.updateMatrix();
       mesh.setMatrixAt(index, dummy.matrix);
-    });
+    }
 
-    mesh.count = instances.length;
+    mesh.count = count;
     mesh.instanceMatrix.needsUpdate = true;
-  }, [instances, dummy, geometry]);
+    // Without this, Three keeps a tiny default bounds at the origin and the
+    // whole forest gets frustum-culled as soon as instances leave 0,0,0.
+    mesh.computeBoundingSphere();
+  }, [instances, dummy, geometry, capacity]);
 
   return (
-    <instancedMesh ref={meshRef} args={[geometry, undefined, instances.length]} castShadow receiveShadow>
+    <instancedMesh
+      ref={meshRef}
+      args={[geometry, undefined, capacity]}
+      castShadow
+      receiveShadow
+      frustumCulled={false}
+    >
       <meshStandardMaterial
         vertexColors
         roughness={0.86}
@@ -2977,6 +3012,7 @@ export function VegetationLayer({ patches }: { patches: VegetationPatch[] }) {
   const plantsByType = useMemo(() => {
     const groups = new Map<string, VegetationInstance[]>();
     for (const patch of patches) {
+      if (!patch.instances.length) continue;
       const list = groups.get(patch.type) ?? [];
       list.push(...patch.instances);
       groups.set(patch.type, list);
@@ -2984,24 +3020,12 @@ export function VegetationLayer({ patches }: { patches: VegetationPatch[] }) {
     return groups;
   }, [patches]);
 
-  const plantGeometries = useMemo(() => {
-    const map = new Map<string, THREE.BufferGeometry>();
-    for (const type of plantsByType.keys()) {
-      map.set(type, createPlantGeometry(type));
-    }
-    return map;
-  }, [plantsByType]);
-
-  if (!patches.length) return null;
+  if (!plantsByType.size) return null;
 
   return (
     <>
       {Array.from(plantsByType.entries()).map(([type, instances]) => (
-        <PlantInstances
-          key={type}
-          geometry={plantGeometries.get(type)!}
-          instances={instances}
-        />
+        <PlantInstances key={type} geometry={geometryForPlant(type)} instances={instances} />
       ))}
     </>
   );

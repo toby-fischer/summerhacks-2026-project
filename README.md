@@ -62,4 +62,12 @@ Building rows use `type='building'`:
 | `properties.height` | world-space height in meters |
 | `properties.coverage`, `properties.meanInk` | sketch metrics for tuning |
 
+Vegetation rows use `type='vegetation'`:
+
+| column | |
+|---|---|
+| `x`, `z` | planting center |
+| `properties.selection` | plant type or biome key |
+| `properties.seed` | so the forest regenerates identically |
+
 `terrain.ts` imports nothing — it's testable on its own and reusable anywhere.

@@ -1,9 +1,10 @@
 // app/WeatherFX.tsx
 //
-// Bright daytime sky + fog/lights from weather cells. No cloud sheets.
+// Bright daytime sky + fog/lights + player-drawn clouds.
+// No ambient weather cloud sheets.
 'use client';
 
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Sky } from '@react-three/drei';
 import * as THREE from 'three';
@@ -12,9 +13,12 @@ import {
   blendWeatherAt,
   muteForInterior,
   SUN_POSITION,
+  type SkyCloudAsset,
   type WeatherAsset,
   type WeatherField,
 } from './weather';
+
+const SKETCH_GRID = 64;
 
 const DEFAULT_FIELD: WeatherField = {
   clear: 1,
@@ -36,11 +40,21 @@ function lerpHex(a: string, b: string, t: number): string {
   return '#' + ca.lerp(cb, t).getHexString();
 }
 
+function decodeSketch(b64: string): Float32Array {
+  const bin = atob(b64);
+  const out = new Float32Array(SKETCH_GRID * SKETCH_GRID);
+  const n = Math.min(bin.length, out.length);
+  for (let i = 0; i < n; i++) out[i] = bin.charCodeAt(i) / 255;
+  return out;
+}
+
 export function WeatherSystem({
   assets,
+  skyClouds,
   indoors,
 }: {
   assets: WeatherAsset[];
+  skyClouds: SkyCloudAsset[];
   indoors: boolean;
 }) {
   const fieldRef = useRef<WeatherField>({ ...DEFAULT_FIELD });
@@ -93,6 +107,51 @@ export function WeatherSystem({
         color="#fff6e8"
         castShadow
       />
+      {skyClouds.map((c) => (
+        <DrawnCloud key={c.id} cloud={c} />
+      ))}
     </>
+  );
+}
+
+function DrawnCloud({ cloud }: { cloud: SkyCloudAsset }) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const { camera } = useThree();
+
+  const texture = useMemo(() => {
+    const grid = decodeSketch(cloud.sketch);
+    const data = new Uint8Array(SKETCH_GRID * SKETCH_GRID * 4);
+    for (let i = 0; i < SKETCH_GRID * SKETCH_GRID; i++) {
+      const ink = grid[i] ?? 0;
+      const a = Math.min(230, Math.round(ink * 230));
+      data[i * 4] = 245;
+      data[i * 4 + 1] = 248;
+      data[i * 4 + 2] = 252;
+      data[i * 4 + 3] = a;
+    }
+    const tex = new THREE.DataTexture(data, SKETCH_GRID, SKETCH_GRID, THREE.RGBAFormat);
+    tex.needsUpdate = true;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    tex.flipY = true;
+    return tex;
+  }, [cloud.sketch]);
+
+  useFrame(() => {
+    if (!meshRef.current) return;
+    meshRef.current.lookAt(camera.position);
+  });
+
+  return (
+    <mesh ref={meshRef} position={[cloud.x, 150, cloud.z]} scale={[100, 62, 1]}>
+      <planeGeometry args={[1, 1]} />
+      <meshBasicMaterial
+        map={texture}
+        transparent
+        depthWrite={false}
+        side={THREE.DoubleSide}
+        opacity={0.9}
+      />
+    </mesh>
   );
 }
