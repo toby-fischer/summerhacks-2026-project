@@ -6,7 +6,7 @@
 // What persists is the *sketch*, not the heightmap: 64x64 bytes is ~2KB of
 // base64 in jsonb, where a 128x128 float heightmap would be ~64KB per row.
 // Every client re-runs synthesize() and lands on identical terrain because the
-// pipeline is deterministic ΓÇö cheap to store, cheap to sync, impossible to
+// pipeline is deterministic — cheap to store, cheap to sync, impossible to
 // desync.
 'use client';
 
@@ -73,7 +73,7 @@ const PATCH_SCALE = 300;
 const PATCH_MAX_H = 60;
 const EYE = 1.8;
 const PROXIMITY_AUDIO_DISTANCE = 50; // Max distance in meters to hear animal
-/** How far ahead of the player a new sketch lands ΓÇö enough that even the
+/** How far ahead of the player a new sketch lands — enough that even the
  *  largest generated building (~12.6m wide) can't spawn on top of them. */
 const SKETCH_SPAWN_DISTANCE = 14;
 
@@ -295,7 +295,7 @@ function sampleFootprintGround(
     ne: groundAt(built, cx + halfW, cz + halfD),
     sw: groundAt(built, cx - halfW, cz - halfD),
     se: groundAt(built, cx + halfW, cz - halfD),
-    // The door sits at (cx, cz + halfD) ΓÇö sampled directly so the threshold
+    // The door sits at (cx, cz + halfD) — sampled directly so the threshold
     // always lines up with the ground right in front of it, not just the
     // footprint's corners.
     frontMid: groundAt(built, cx, cz + halfD),
@@ -334,7 +334,7 @@ function footprintFor(building: BuildingAsset): { cx: number; cz: number; width:
  * interior/door logic need to agree on. Computed once per building so the
  * door you can see is exactly the door you can walk through.
  */
-/** Enterable garage bay carved into a side wall ΓÇö house type only. */
+/** Enterable garage bay carved into a side wall — house type only. */
 interface GarageBay {
   side: 'west' | 'east';
   /** Offset from the building center along z, in world units. */
@@ -361,7 +361,7 @@ interface BuildingLayout {
   profile: { center: number; nw: number; ne: number; sw: number; se: number; frontMid: number };
   /**
    * Per-floor width and horizontal center offset (world units), index 0 =
-   * ground floor. Ground floor always equals `width`/offset 0 ΓÇö collision,
+   * ground floor. Ground floor always equals `width`/offset 0 — collision,
    * the door, the garage, and terrain flattening all key off that and must
    * stay put. Floors above it taper/shift to follow the sketch's silhouette
    * (see floorProfile on BuildingAsset), so a tapering or lopsided drawing
@@ -394,7 +394,7 @@ function buildingLayout(
   // Floor height is pinned to the *front* edge (the door side, nw/ne/frontMid)
   // rather than the highest corner overall. Basing it on the highest corner
   // anywhere on the footprint (including the back) meant a building whose
-  // back happened to touch higher ground ΓÇö a hillside behind it ΓÇö got
+  // back happened to touch higher ground — a hillside behind it — got
   // lifted along with that corner, stranding the entrance above the actual
   // ground in front of it, unreachable on foot. The back can instead sit
   // partly embedded into a rising slope; the walk-up to the door matters
@@ -464,7 +464,7 @@ const EXTERIOR_WALL_T = 0.24;
 
 /**
  * The building's exterior walls as thin collision segments, with a gap left
- * open at the door ΓÇö there is no invisible box around the whole building,
+ * open at the door — there is no invisible box around the whole building,
  * so walking through the doorway is the only way in, exactly like walking
  * up to any other wall.
  */
@@ -473,7 +473,7 @@ function exteriorWallFootprints(layout: BuildingLayout): Footprint[] {
   const halfD = layout.depth / 2;
   const out: Footprint[] = [];
 
-  // Side (east/west) walls ΓÇö plain full-depth slabs, unless this is a house
+  // Side (east/west) walls — plain full-depth slabs, unless this is a house
   // with a garage bay carved into this particular side, in which case the
   // wall splits around the garage-door gap exactly like the front door does.
   const pushSideWall = (side: 'west' | 'east') => {
@@ -553,15 +553,15 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
   const baysZ = Math.round(depth / bayW);
 
   // Walls extend downward past floorY as a skirt to cover minor unevenness
-  // under them, but capped ΓÇö the corner posts below already bridge any real
+  // under them, but capped — the corner posts below already bridge any real
   // slope down to each corner's actual ground height with thin per-corner
   // pillars. Without the cap, a building spawned where one corner lands on
   // a steep slope (a mountainside, say) would stretch its entire wall face
-  // ΓÇö a single flat box, not just a corner ΓÇö down to match, ballooning into
+  // — a single flat box, not just a corner — down to match, ballooning into
   // a giant wedge instead of a normal building on stilts.
   const sideSlope = Math.min(floorY - Math.min(profile.nw, profile.ne, profile.sw, profile.se), floorH * 1.2);
   // The skirt must stay pinned to the same top (floorY + bodyH) as the roof
-  // ΓÇö otherwise the symmetric box centered at floorY + bodyH/2 pushes the
+  // — otherwise the symmetric box centered at floorY + bodyH/2 pushes the
   // top past the roof base too, and the wall visibly pokes through a thin
   // pitched roof slab (it was only hidden before inside the old solid
   // stepped-roof box).
@@ -610,7 +610,7 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
   const floorBottomY = (f: number) => (f === 0 ? floorY - sideSlope : floorY + f * floorH);
   const floorTopY = (f: number) => floorY + (f + 1) * floorH;
 
-  // Wall slabs per floor ΓÇö split around the garage-door gap on whichever
+  // Wall slabs per floor — split around the garage-door gap on whichever
   // side/floor has one (ground floor only), exactly like the front door.
   for (let f = 0; f < floors; f++) {
     const hw = floorHalfW(f);
@@ -643,7 +643,7 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
     put('wall', [fcx, cy, cz + halfD - wallT / 2], [hw * 2, h, wallT]);
   }
 
-  // Floor trims ΓÇö sit at each floor line, sized to whichever floor is above.
+  // Floor trims — sit at each floor line, sized to whichever floor is above.
   for (let f = 1; f <= floors; f++) {
     if (f % styleCfg.trimEvery !== 0) continue;
     const y = floorY + f * floorH;
@@ -798,7 +798,7 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
     }
   } else if (flatRoofCulture && buildingType !== 'apartment' && buildingType !== 'tower') {
     // Adobe/modern force a flat roof with a parapet lip even on a
-    // structurally pitched-roof type ΓÇö the culture's material grammar wins.
+    // structurally pitched-roof type — the culture's material grammar wins.
     const parapetH = culture === 'adobe' ? 0.42 : 0.26;
     put('roof', [topCx, topY + 0.06, cz], [topHalfW * 2 + 0.16, 0.12, depth + 0.16]);
     put('trim', [topCx, topY + parapetH / 2, cz - halfD], [topHalfW * 2 + 0.2, parapetH, wallT]);
@@ -809,7 +809,7 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
       put('accent', [cx, topY + 0.02, cz + halfD + 0.02], [width * 0.9, 0.04, 0.02]);
     }
   } else {
-    // Flat / stepped roof ΓÇö apartment/tower massing, or the palette-only
+    // Flat / stepped roof — apartment/tower massing, or the palette-only
     // fallback for flat-roof cultures on an apartment/tower structure.
     const roofSteps = styleCfg.roofSteps;
     let roofW = topHalfW * 2 * 0.96;
@@ -915,7 +915,7 @@ interface CulturePalette {
   balcony: string;
 }
 
-/** Exterior material grammar per cultural style ΓÇö the palette axis of CultureStyle. */
+/** Exterior material grammar per cultural style — the palette axis of CultureStyle. */
 const CULTURE_PALETTES: CulturePalette[] = [
   {
     culture: 'mediterranean',
@@ -1073,7 +1073,7 @@ function BuildingKit({
 
 /**
  * Interiors live in the same scene, at the building's own x/z, just deep
- * underground ΓÇö far enough below the terrain/plain (y=0) and every patch's
+ * underground — far enough below the terrain/plain (y=0) and every patch's
  * positive heights that nothing ever pokes through. Walking through a door
  * teleports the camera down here instead of swapping scenes, so realtime
  * presence, lighting and the renderer all keep working unmodified.
@@ -1278,7 +1278,7 @@ function InteriorScene({
       })),
     [floorplan.walls, floorplan.wallHeight],
   );
-  // Baseboard + crown trim along every wall run ΓÇö a plain box reads as a
+  // Baseboard + crown trim along every wall run — a plain box reads as a
   // slab, a two-tone strip at floor and ceiling reads as a built room.
   const baseboards = useMemo<BoxTransform[]>(
     () =>
@@ -1317,7 +1317,7 @@ function InteriorScene({
   }, [floorplan.rooms, palette.floor]);
 
   // Punched window insets along the exterior perimeter, glowing softly so
-  // rooms don't read as sealed boxes ΓÇö deterministic per building/floor/wall.
+  // rooms don't read as sealed boxes — deterministic per building/floor/wall.
   const windows = useMemo<BoxTransform[]>(() => {
     const out: BoxTransform[] = [];
     const bay = 2.1;
@@ -1348,7 +1348,7 @@ function InteriorScene({
     return out;
   }, [floorplan.halfW, floorplan.halfD, floorplan.wallHeight, building.id, floor]);
 
-  // Door slab + frame at the ground-floor threshold ΓÇö without it, looking
+  // Door slab + frame at the ground-floor threshold — without it, looking
   // back at the doorway from inside showed straight through to empty space.
   const doorPanels = useMemo<{ frame: BoxTransform[]; slab: BoxTransform[] }>(() => {
     if (floor !== 0) return { frame: [], slab: [] };
@@ -1365,7 +1365,7 @@ function InteriorScene({
     };
   }, [floor, layout.doorW, layout.doorH, floorplan.halfD, floorplan.wallHeight]);
 
-  // Visual steps only ΓÇö the actual walkable height comes from Walker's
+  // Visual steps only — the actual walkable height comes from Walker's
   // continuous stair-progress calculation, not from these box positions.
   const stairSteps = useMemo<BoxTransform[]>(() => {
     const s = floorplan.stair;
@@ -1481,20 +1481,20 @@ function groundAt(
  * at the edges.
  *
  * Building floor height only ever samples a handful of points right at the
- * footprint (see buildingLayout's floorY). On genuinely rugged terrain ΓÇö
- * the side of a mountain, say ΓÇö the ground a couple of metres away from
+ * footprint (see buildingLayout's floorY). On genuinely rugged terrain —
+ * the side of a mountain, say — the ground a couple of metres away from
  * those sample points can differ by many metres, so the building (and its
  * exactly-level floor) ends up perched above a cliff with no walkable path
  * to the door at all. Flattening a small lot under and in front of every
  * building guarantees a level pad and a walkable approach regardless of
- * what the surrounding terrain looks like ΓÇö the same trick real building
+ * what the surrounding terrain looks like — the same trick real building
  * sites use (grading), just automatic.
  */
 /**
  * Returns a new `built` list with every building's pad carved flat.
  *
  * Clones (rather than mutates in place) whichever patch a building actually
- * touches, and writes the clone back into `cache` ΓÇö so the patch gets a
+ * touches, and writes the clone back into `cache` — so the patch gets a
  * fresh terrain object reference the first time it's flattened. PatchMesh
  * memoizes its geometry on that reference; mutating the old object in place
  * would update collision/ground-height instantly (heightAt reads the array
@@ -1517,7 +1517,7 @@ function flattenBuildingPads(
     const halfD = depth / 2;
 
     // Same rule buildingLayout uses for floorY, sampled from the terrain as
-    // it stood before this building's own flattening ΓÇö so the pad matches
+    // it stood before this building's own flattening — so the pad matches
     // the floor height the building will actually render at.
     const frontMid = groundAt(built, cx, cz + halfD);
     const nw = groundAt(built, cx - halfW, cz + halfD);
@@ -1910,7 +1910,7 @@ function AnimalMesh({
  * How far the player's body pokes out past the camera point, in metres.
  * Kept tight (rather than a generous shoulder-width) because it's tested
  * against thin wall segments now, both outdoors (building walls) and
- * indoors (room walls) ΓÇö anything bigger starts closing off doorway gaps.
+ * indoors (room walls) — anything bigger starts closing off doorway gaps.
  */
 const WALL_CLEARANCE = 0.32;
 
@@ -1923,7 +1923,7 @@ function collidesAt(footprints: Footprint[], x: number, z: number, radius: numbe
   return false;
 }
 
-/** Interior wall segments are thin AABBs too ΓÇö same collision test, different boxes. */
+/** Interior wall segments are thin AABBs too — same collision test, different boxes. */
 function wallBoxToFootprint(w: { cx: number; cz: number; halfW: number; halfD: number }): Footprint {
   return { cx: w.cx, cz: w.cz, width: w.halfW * 2, depth: w.halfD * 2 };
 }
@@ -2092,7 +2092,7 @@ function Walker({
     const down = (e: KeyboardEvent) => {
       if (isModalOpen) return;
       set(e.code, true);
-      // Spawn ahead of the player, not underfoot ΓÇö otherwise a newly
+      // Spawn ahead of the player, not underfoot — otherwise a newly
       // generated building's collision box (or animal mesh) traps you.
       const forwardSpawn = (distance: number): [number, number] => {
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -2159,7 +2159,7 @@ function Walker({
         // Resolve against buildings axis-by-axis so sliding along a wall
         // feels natural instead of stopping dead on any glancing contact.
         // The only opening in any wall is the doorway, so this is also the
-        // entire "how do you get inside" mechanic ΓÇö no keypress involved.
+        // entire "how do you get inside" mechanic — no keypress involved.
         const nextX = camera.position.x + dir.current.x;
         const nextZ = camera.position.z + dir.current.z;
         if (!collidesAt(footprints, nextX, nextZ)) {
@@ -2176,7 +2176,7 @@ function Walker({
       const ground = groundAt(built, camera.position.x, camera.position.z) + EYE;
       camera.position.y += (ground - camera.position.y) * Math.min(1, delta * 10);
 
-      // Walked far enough through a doorway gap to be inside the shell ΓÇö
+      // Walked far enough through a doorway gap to be inside the shell —
       // drop straight into that building's interior, floor 0.
       for (const { building, layout } of buildingLayouts) {
         if (insideBuildingShell(layout, camera.position.x, camera.position.z)) {
@@ -2230,7 +2230,7 @@ function Walker({
       }
     }
 
-    // Ground floor's front wall has the same doorway gap outdoors and in ΓÇö
+    // Ground floor's front wall has the same doorway gap outdoors and in —
     // walking back through it (past the wall line) leaves the building the
     // same way you came in, no keypress needed.
     if (interior.floor === 0 && (Math.abs(lx) > floorplan.halfW || Math.abs(lz) > floorplan.halfD)) {
@@ -2241,7 +2241,7 @@ function Walker({
       onInteriorChange(null);
       return;
     }
-    // Upper floors have no door to the outside ΓÇö a wall-lined safety net so
+    // Upper floors have no door to the outside — a wall-lined safety net so
     // a stairwell edge case can't drift a player into the void.
     lx = clamp(lx, -floorplan.halfW - 2.5, floorplan.halfW + 2.5);
     lz = clamp(lz, -floorplan.halfD - 2.5, floorplan.halfD + 2.5);
@@ -2338,11 +2338,11 @@ export default function World() {
   const travellerMap = useRef<Map<string, Traveller>>(new Map());
 
   // Synthesis is the expensive step, so it happens once per patch and is
-  // cached by id ΓÇö not on every render or frame.
+  // cached by id — not on every render or frame.
   const cache = useRef<Map<string, TerrainData>>(new Map());
   // Tracks which (building, patch) pads have already been carved flat, so
   // re-renders don't re-scan every terrain grid for every building already
-  // handled ΓÇö flattening a patch's heights in place is a one-time fix-up.
+  // handled — flattening a patch's heights in place is a one-time fix-up.
   const flattenedPads = useRef<Set<string>>(new Set());
   const built = useMemo(() => {
     const list = patches.map((patch) => {
@@ -2776,8 +2776,8 @@ export default function World() {
     status === 'live'
       ? `${travellers.length} traveller${travellers.length === 1 ? '' : 's'} nearby`
       : status === 'connecting'
-        ? 'connectingΓÇª'
-        : 'offline ΓÇö solo world';
+        ? 'connecting…'
+        : 'offline — solo world';
 
   const isModalOpen = drawAt !== null || skyDrawAt !== null || vegetationAt !== null || (animalDrawAt !== null && !isRecordingPath);
 
@@ -2864,31 +2864,31 @@ export default function World() {
             href="/dashboard"
             className="pointer-events-auto text-base text-white/60 underline decoration-white/25 underline-offset-2 hover:text-white/90"
           >
-            observatory Γåù
+            observatory ↗
           </Link>
         </div>
         <p className="mt-1 text-sm text-white/70">
-          {patches.length} landform{patches.length === 1 ? '' : 's'} ┬╖ {buildings.length}{' '}
-          building{buildings.length === 1 ? '' : 's'} ┬╖ {animals.length} animal
-          {animals.length === 1 ? '' : 's'} ┬╖ {vegetationPatches.length} plant patch
-          {vegetationPatches.length === 1 ? '' : 'es'} ┬╖ {skyClouds.length} cloud
-          {skyClouds.length === 1 ? '' : 's'} ┬╖ {label}
+          {patches.length} landform{patches.length === 1 ? '' : 's'} · {buildings.length}{' '}
+          building{buildings.length === 1 ? '' : 's'} · {animals.length} animal
+          {animals.length === 1 ? '' : 's'} · {vegetationPatches.length} plant patch
+          {vegetationPatches.length === 1 ? '' : 'es'} · {skyClouds.length} cloud
+          {skyClouds.length === 1 ? '' : 's'} · {label}
         </p>
       </div>
 
       <div className="pointer-events-none absolute bottom-6 left-6 space-y-1.5 text-base text-white/60">
         <p>
-          <span className="text-white/85">Click</span> to look ┬╖{' '}
-          <span className="text-white/85">WASD</span> to walk ┬╖{' '}
+          <span className="text-white/85">Click</span> to look ·{' '}
+          <span className="text-white/85">WASD</span> to walk ·{' '}
           <span className="text-white/85">Shift</span> to run
         </p>
         {interior ? (
-          <p>Floor {interior.floor + 1} ΓÇö find the stairwell to change floors, or walk back out the door</p>
+          <p>Floor {interior.floor + 1} — find the stairwell to change floors, or walk back out the door</p>
         ) : (
           <p>
-            <span className="text-white/85">E</span> terrain/buildings ┬╖{' '}
-            <span className="text-white/85">R</span> animal ┬╖{' '}
-            <span className="text-white/85">T</span> draw cloud ┬╖{' '}
+            <span className="text-white/85">E</span> terrain/buildings ·{' '}
+            <span className="text-white/85">R</span> animal ·{' '}
+            <span className="text-white/85">T</span> draw cloud ·{' '}
             <span className="text-white/85">F</span> plant vegetation ·{' '}
             <span className="text-white/85">Esc</span> to release
           </p>
@@ -3022,7 +3022,7 @@ function SkyDrawPanel({
       <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
         <h2 className="text-lg font-semibold text-white">Draw a cloud</h2>
         <p className="mt-1 text-sm text-white/60">
-          Soft white strokes become a cloud hanging over this spot ΓÇö others will see it in the shared sky.
+          Soft white strokes become a cloud hanging over this spot — others will see it in the shared sky.
         </p>
 
         <canvas
@@ -3194,7 +3194,7 @@ function DrawPanel({
         </h2>
         <p className="mt-1 text-sm text-white/60">
           {mode === 'terrain'
-            ? 'Draw a ridgeline ΓÇö darker and thicker means higher ground.'
+            ? 'Draw a ridgeline — darker and thicker means higher ground.'
             : 'Draw a front-view building silhouette. Sketch width drives width; sketch height drives building height.'}
         </p>
 
@@ -3628,7 +3628,7 @@ export function AnimalDrawPanel({
               </div>
             ) : soundDataUrl ? (
               <div className="w-full text-center space-y-3">
-                <p className="text-sm text-emerald-400 font-medium">Γ£ô Sound added successfully!</p>
+                <p className="text-sm text-emerald-400 font-medium">✓ Sound added successfully!</p>
                 <audio src={soundDataUrl} controls className="w-full" />
                 <button
                   onClick={() => setSoundDataUrl(null)}
@@ -3675,7 +3675,7 @@ export function AnimalDrawPanel({
             {recordedPath ? (
               <div className="text-center space-y-3 w-full">
                 <p className="text-sm text-emerald-400 font-medium">
-                  Γ£ô Path recorded ({recordedPath.length} points)
+                  ✓ Path recorded ({recordedPath.length} points)
                 </p>
                 
                 {/* Speed Slider Added Here */}

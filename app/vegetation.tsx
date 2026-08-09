@@ -591,7 +591,7 @@ const createCactus = (style: PlantStyle) => {
   /*
    * Arms.
    *
-   * Usually 2ΓÇô4 arms depending on detail.
+   * Usually 2–4 arms depending on detail.
    */
   const arms = Math.max(
     1,
@@ -3066,7 +3066,7 @@ export function VegetationPanel({
           <div>
             <h2 className="text-lg font-semibold text-white">Plant vegetation here</h2>
             <p className="mt-1 text-sm text-white/60">
-              Type a vegetation type like ΓÇ£cherry blossomΓÇ¥ or ΓÇ£dead forestΓÇ¥. Hundreds of plants will appear on the terrain surface.
+              Type a vegetation type like “cherry blossom” or “dead forest”. Hundreds of plants will appear on the terrain surface.
             </p>
           </div>
           <button
@@ -3157,14 +3157,14 @@ export function VegetationPanel({
                   <p>Plant composition:</p>
                   {selectedBiome.plants.map((entry) => (
                     <p key={entry.type}>
-                      {entry.type.charAt(0).toUpperCase() + entry.type.slice(1)} ΓÇö {entry.weight}%
+                      {entry.type.charAt(0).toUpperCase() + entry.type.slice(1)} — {entry.weight}%
                     </p>
                   ))}
                 </div>
               </div>
             ) : selectedPlant ? (
               <div className="mt-4 rounded-3xl border border-white/10 bg-black/40 p-4">
-                <p className="text-sm text-white/70">Preview of ΓÇ£{selectedPlant.name}ΓÇ¥</p>
+                <p className="text-sm text-white/70">Preview of “{selectedPlant.name}”</p>
                 <div className="mt-3 rounded-2xl border border-white/10 bg-black/80 p-2">
                   <PlantPreview type={selectedPlant.type} />
                 </div>
