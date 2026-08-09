@@ -110,29 +110,30 @@ export function blendWeatherAt(assets: WeatherAsset[], x: number, z: number): We
   const fogN = acc.fog / weightSum;
   const stormN = acc.storm / weightSum;
 
+  // Keep everything in "slightly cloudy" territory — never crush visibility.
   const cloudCoverage = Math.min(
-    1,
-    0.08 + lightN * 0.35 + overcastN * 0.7 + stormN * 0.9 + fogN * 0.55,
+    0.45,
+    0.06 + lightN * 0.18 + overcastN * 0.28 + stormN * 0.35 + fogN * 0.22,
   );
-  const cloudLow = Math.min(1, lightN * 0.2 + overcastN * 0.45 + stormN * 0.55 + fogN * 0.95);
-  const foggy = Math.min(1, fogN + stormN * 0.4 + overcastN * 0.2);
-  const fogDensity = 0.0022 + foggy * 0.007 + stormN * 0.0035;
+  const cloudLow = Math.min(0.35, lightN * 0.08 + overcastN * 0.15 + stormN * 0.2 + fogN * 0.3);
+  const foggy = Math.min(1, fogN * 0.6 + stormN * 0.15 + overcastN * 0.08);
+  const fogDensity = 0.0022 + foggy * 0.0018 + stormN * 0.0008;
   const lightDim = Math.max(
-    0.25,
-    1 - stormN * 0.55 - fogN * 0.3 - overcastN * 0.18 - lightN * 0.06,
+    0.88,
+    1 - stormN * 0.1 - fogN * 0.06 - overcastN * 0.04 - lightN * 0.02,
   );
 
   let fogColor = '#b9c6d6';
-  if (stormN > 0.35) fogColor = '#6a7380';
-  else if (fogN > 0.35) fogColor = '#a8b0b8';
-  else if (overcastN > 0.3) fogColor = '#9aa8b8';
-  else if (lightN > 0.3) fogColor = '#c8d2de';
+  if (stormN > 0.4) fogColor = '#a8b4c2';
+  else if (fogN > 0.4) fogColor = '#b4bcc6';
+  else if (overcastN > 0.35) fogColor = '#b0bcc8';
 
-  let cloudColor = '#e4eaf2';
-  if (stormN > overcastN && stormN > fogN) cloudColor = '#6e7684';
-  else if (fogN > overcastN) cloudColor = '#b4bcc4';
-  else if (overcastN > lightN) cloudColor = '#9aa6b4';
-  else if (lightN > clearN) cloudColor = '#dce4ee';
+  // Always pale — dark cloud sheets were crushing the scene.
+  let cloudColor = '#eef2f7';
+  if (stormN > overcastN && stormN > fogN) cloudColor = '#c5ced8';
+  else if (fogN > overcastN) cloudColor = '#d8dee6';
+  else if (overcastN > lightN) cloudColor = '#dde4ec';
+  else if (lightN > clearN) cloudColor = '#e8eef5';
 
   return {
     clear: clearN,
@@ -149,23 +150,8 @@ export function blendWeatherAt(assets: WeatherAsset[], x: number, z: number): We
   };
 }
 
-/** Full day cycle length in seconds (real time). */
-export const DAY_CYCLE_SEC = 10 * 60;
-
-export function sunPositionFromTime(elapsedSec: number): [number, number, number] {
-  const phase = ((elapsedSec / DAY_CYCLE_SEC) % 1 + 1) % 1;
-  const angle = phase * Math.PI * 2 - Math.PI / 2;
-  const y = Math.sin(angle);
-  const xz = Math.cos(angle);
-  return [xz * 90, Math.max(-40, y * 120), -xz * 40 - 80];
-}
-
-export function daylightFactor(sunY: number): number {
-  const t = (sunY + 15) / 80;
-  if (t <= 0) return 0;
-  if (t >= 1) return 1;
-  return t * t * (3 - 2 * t);
-}
+/** Fixed daytime sun position for the shared sky. */
+export const SUN_POSITION: [number, number, number] = [90, 95, -120];
 
 export function muteForInterior(field: WeatherField): WeatherField {
   return {
@@ -174,4 +160,12 @@ export function muteForInterior(field: WeatherField): WeatherField {
     cloudCoverage: field.cloudCoverage * 0.25,
     lightDim: Math.max(field.lightDim, 0.7),
   };
+}
+
+/** Player-drawn cloud blob in the sky. */
+export interface SkyCloudAsset {
+  id: string;
+  x: number;
+  z: number;
+  sketch: string;
 }
