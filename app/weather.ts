@@ -1,7 +1,7 @@
 // app/weather.ts
 //
-// Pure blend over weather contributions. Mood is cloudy sky + fog/light —
-// no precipitation. Legacy DB values (rain/snow) map into cloudy types.
+// Pure blend over weather contributions. Mood is light cloudy sky + fog —
+// kept soft so the scene stays bright. Legacy DB values (rain/snow) map in.
 
 export type WeatherCondition = 'clear' | 'light' | 'overcast' | 'storm' | 'fog';
 
@@ -65,18 +65,21 @@ export interface WeatherField {
   cloudLow: number;
 }
 
+/** Fixed bright daytime sun — no night cycle washing the sky gray. */
+export const SUN_POSITION: [number, number, number] = [90, 110, -100];
+
 const BASE: WeatherField = {
   clear: 1,
   light: 0,
   overcast: 0,
   fog: 0,
   storm: 0,
-  fogDensity: 0.0022,
-  fogColor: '#b9c6d6',
+  fogDensity: 0.0012,
+  fogColor: '#c8daf0',
   lightDim: 1,
-  cloudCoverage: 0.12,
-  cloudColor: '#e4eaf2',
-  cloudLow: 0.15,
+  cloudCoverage: 0.04,
+  cloudColor: '#f2f6fb',
+  cloudLow: 0.1,
 };
 
 function bucket(condition: WeatherCondition): keyof Pick<
@@ -88,7 +91,7 @@ function bucket(condition: WeatherCondition): keyof Pick<
 
 /**
  * Distance-weighted blend of nearby weather cells at world (x, z).
- * Outside all radii → calm default day field.
+ * Outside all radii → calm bright day. Soft caps so weather never grays out the sky.
  */
 export function blendWeatherAt(assets: WeatherAsset[], x: number, z: number): WeatherField {
   const acc = { clear: 0, light: 0, overcast: 0, fog: 0, storm: 0 };
@@ -111,28 +114,27 @@ export function blendWeatherAt(assets: WeatherAsset[], x: number, z: number): We
   const stormN = acc.storm / weightSum;
 
   const cloudCoverage = Math.min(
-    1,
-    0.08 + lightN * 0.35 + overcastN * 0.7 + stormN * 0.9 + fogN * 0.55,
+    0.35,
+    0.04 + lightN * 0.14 + overcastN * 0.22 + stormN * 0.28 + fogN * 0.16,
   );
-  const cloudLow = Math.min(1, lightN * 0.2 + overcastN * 0.45 + stormN * 0.55 + fogN * 0.95);
-  const foggy = Math.min(1, fogN + stormN * 0.4 + overcastN * 0.2);
-  const fogDensity = 0.0022 + foggy * 0.007 + stormN * 0.0035;
+  const cloudLow = Math.min(0.3, lightN * 0.06 + overcastN * 0.12 + stormN * 0.16 + fogN * 0.22);
+  const foggy = Math.min(1, fogN * 0.45 + stormN * 0.12 + overcastN * 0.06);
+  const fogDensity = 0.0012 + foggy * 0.0012 + stormN * 0.0005;
   const lightDim = Math.max(
-    0.25,
-    1 - stormN * 0.55 - fogN * 0.3 - overcastN * 0.18 - lightN * 0.06,
+    0.9,
+    1 - stormN * 0.08 - fogN * 0.05 - overcastN * 0.03 - lightN * 0.015,
   );
 
-  let fogColor = '#b9c6d6';
-  if (stormN > 0.35) fogColor = '#6a7380';
-  else if (fogN > 0.35) fogColor = '#a8b0b8';
-  else if (overcastN > 0.3) fogColor = '#9aa8b8';
-  else if (lightN > 0.3) fogColor = '#c8d2de';
+  let fogColor = '#c8daf0';
+  if (stormN > 0.4) fogColor = '#b4c4d4';
+  else if (fogN > 0.4) fogColor = '#c0ccd8';
+  else if (overcastN > 0.35) fogColor = '#c4d2e2';
 
-  let cloudColor = '#e4eaf2';
-  if (stormN > overcastN && stormN > fogN) cloudColor = '#6e7684';
-  else if (fogN > overcastN) cloudColor = '#b4bcc4';
-  else if (overcastN > lightN) cloudColor = '#9aa6b4';
-  else if (lightN > clearN) cloudColor = '#dce4ee';
+  let cloudColor = '#f5f8fc';
+  if (stormN > overcastN && stormN > fogN) cloudColor = '#d8e0ea';
+  else if (fogN > overcastN) cloudColor = '#e4eaf0';
+  else if (overcastN > lightN) cloudColor = '#e8eef6';
+  else if (lightN > clearN) cloudColor = '#eef3f9';
 
   return {
     clear: clearN,
@@ -149,29 +151,19 @@ export function blendWeatherAt(assets: WeatherAsset[], x: number, z: number): We
   };
 }
 
-/** Full day cycle length in seconds (real time). */
-export const DAY_CYCLE_SEC = 10 * 60;
-
-export function sunPositionFromTime(elapsedSec: number): [number, number, number] {
-  const phase = ((elapsedSec / DAY_CYCLE_SEC) % 1 + 1) % 1;
-  const angle = phase * Math.PI * 2 - Math.PI / 2;
-  const y = Math.sin(angle);
-  const xz = Math.cos(angle);
-  return [xz * 90, Math.max(-40, y * 120), -xz * 40 - 80];
-}
-
-export function daylightFactor(sunY: number): number {
-  const t = (sunY + 15) / 80;
-  if (t <= 0) return 0;
-  if (t >= 1) return 1;
-  return t * t * (3 - 2 * t);
-}
-
 export function muteForInterior(field: WeatherField): WeatherField {
   return {
     ...field,
-    fogDensity: Math.min(field.fogDensity, 0.003),
-    cloudCoverage: field.cloudCoverage * 0.25,
-    lightDim: Math.max(field.lightDim, 0.7),
+    fogDensity: Math.min(field.fogDensity, 0.002),
+    cloudCoverage: field.cloudCoverage * 0.2,
+    lightDim: Math.max(field.lightDim, 0.85),
   };
+}
+
+/** Player-drawn cloud blob in the sky. */
+export interface SkyCloudAsset {
+  id: string;
+  x: number;
+  z: number;
+  sketch: string;
 }

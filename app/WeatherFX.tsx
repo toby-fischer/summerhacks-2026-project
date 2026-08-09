@@ -1,21 +1,23 @@
 // app/WeatherFX.tsx
 //
-// Sky / fog / lights + different cloudy decks. No rain or snow particles.
+// Bright daytime sky + soft ambient clouds + player-drawn clouds.
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { Sky, Stars } from '@react-three/drei';
+import { Sky } from '@react-three/drei';
 import * as THREE from 'three';
 
 import {
   blendWeatherAt,
-  daylightFactor,
   muteForInterior,
-  sunPositionFromTime,
+  SUN_POSITION,
+  type SkyCloudAsset,
   type WeatherAsset,
   type WeatherField,
 } from './weather';
+
+const SKETCH_GRID = 64;
 
 const DEFAULT_FIELD: WeatherField = {
   clear: 1,
@@ -23,12 +25,12 @@ const DEFAULT_FIELD: WeatherField = {
   overcast: 0,
   fog: 0,
   storm: 0,
-  fogDensity: 0.0022,
-  fogColor: '#b9c6d6',
+  fogDensity: 0.0012,
+  fogColor: '#c8daf0',
   lightDim: 1,
-  cloudCoverage: 0.12,
-  cloudColor: '#e4eaf2',
-  cloudLow: 0.15,
+  cloudCoverage: 0.04,
+  cloudColor: '#f2f6fb',
+  cloudLow: 0.1,
 };
 
 function lerpHex(a: string, b: string, t: number): string {
@@ -37,25 +39,29 @@ function lerpHex(a: string, b: string, t: number): string {
   return '#' + ca.lerp(cb, t).getHexString();
 }
 
-/**
- * Root weather system: samples the blend at the camera, drives fog/sky/lights
- * and cloudy decks. Drop this once inside the Canvas.
- */
+function decodeSketch(b64: string): Float32Array {
+  const bin = atob(b64);
+  const out = new Float32Array(SKETCH_GRID * SKETCH_GRID);
+  const n = Math.min(bin.length, out.length);
+  for (let i = 0; i < n; i++) out[i] = bin.charCodeAt(i) / 255;
+  return out;
+}
+
 export function WeatherSystem({
   assets,
+  skyClouds,
   indoors,
 }: {
   assets: WeatherAsset[];
+  skyClouds: SkyCloudAsset[];
   indoors: boolean;
 }) {
   const fieldRef = useRef<WeatherField>({ ...DEFAULT_FIELD });
   const ambientRef = useRef<THREE.AmbientLight>(null);
   const sunRef = useRef<THREE.DirectionalLight>(null);
   const { camera, scene } = useThree();
-  const [sunPos, setSunPos] = useState<[number, number, number]>([90, 25, -120]);
-  const frame = useRef(0);
 
-  useFrame((state, dt) => {
+  useFrame((_, dt) => {
     let next = blendWeatherAt(assets, camera.position.x, camera.position.z);
     if (indoors) next = muteForInterior(next);
 
@@ -73,11 +79,6 @@ export function WeatherSystem({
     s.fogColor = lerpHex(s.fogColor, next.fogColor, a);
     s.cloudColor = lerpHex(s.cloudColor, next.cloudColor, a);
 
-    const sun = sunPositionFromTime(state.clock.elapsedTime);
-    frame.current += 1;
-    if (frame.current % 12 === 0) setSunPos([sun[0], sun[1], sun[2]]);
-
-    const day = daylightFactor(sun[1]);
     if (!scene.fog || !(scene.fog instanceof THREE.FogExp2)) {
       scene.fog = new THREE.FogExp2(s.fogColor, s.fogDensity);
     } else {
@@ -86,34 +87,33 @@ export function WeatherSystem({
     }
 
     if (sunRef.current) {
-      sunRef.current.position.set(sun[0], Math.max(12, Math.abs(sun[1]) < 8 ? 12 : sun[1]), sun[2]);
-      sunRef.current.intensity = (0.35 + day * 1.65) * s.lightDim;
-      sunRef.current.color.set(day > 0.35 ? '#fff3e2' : '#b8c4dc');
+      sunRef.current.position.set(...SUN_POSITION);
+      sunRef.current.intensity = 2.2 * s.lightDim;
+      sunRef.current.color.set('#fff6e8');
     }
     if (ambientRef.current) {
-      ambientRef.current.intensity = (0.22 + day * 0.38) * s.lightDim;
+      ambientRef.current.intensity = 0.7 * s.lightDim;
     }
   });
 
-  const day = daylightFactor(sunPos[1]);
-  const turbidity = 4 + fieldRef.current.storm * 6 + fieldRef.current.fog * 3 + (1 - day) * 2;
-  const showStars = day < 0.5;
+  // Low turbidity + higher rayleigh = clearer blue sky, not milky gray.
+  const turbidity = 2 + fieldRef.current.storm * 1.2 + fieldRef.current.fog * 0.6;
 
   return (
     <>
-      <Sky sunPosition={sunPos} turbidity={turbidity} rayleigh={1.2 + day * 1.4} />
-      {showStars && (
-        <Stars radius={500} depth={70} count={700} factor={3 + (1 - day) * 3} fade speed={0.4} />
-      )}
-      <ambientLight ref={ambientRef} intensity={0.6} />
+      <Sky sunPosition={SUN_POSITION} turbidity={turbidity} rayleigh={2.8} mieCoefficient={0.004} />
+      <ambientLight ref={ambientRef} intensity={0.7} />
       <directionalLight
         ref={sunRef}
-        position={[120, 190, -70]}
-        intensity={2.0}
-        color="#fff3e2"
+        position={SUN_POSITION}
+        intensity={2.2}
+        color="#fff6e8"
         castShadow
       />
       <CheapClouds fieldRef={fieldRef} />
+      {skyClouds.map((c) => (
+        <DrawnCloud key={c.id} cloud={c} />
+      ))}
     </>
   );
 }
@@ -123,16 +123,15 @@ function CheapClouds({ fieldRef }: { fieldRef: React.MutableRefObject<WeatherFie
   const { camera } = useThree();
   const mats = useRef<THREE.MeshBasicMaterial[]>([]);
 
-  // More sheets so overcast / storm can read as a full deck, not eight blotches.
   const planes = useMemo(() => {
     const list: { pos: [number, number, number]; scale: [number, number, number]; speed: number }[] = [];
-    for (let i = 0; i < 14; i++) {
-      const ang = (i / 14) * Math.PI * 2 + (i % 3) * 0.2;
-      const r = 120 + (i % 5) * 70;
+    for (let i = 0; i < 5; i++) {
+      const ang = (i / 5) * Math.PI * 2 + (i % 3) * 0.25;
+      const r = 200 + (i % 3) * 90;
       list.push({
         pos: [Math.cos(ang) * r, 0, Math.sin(ang) * r],
-        scale: [160 + (i % 4) * 50, 1, 80 + (i % 3) * 35],
-        speed: 1.5 + (i % 5),
+        scale: [100 + (i % 3) * 35, 1, 45 + (i % 2) * 20],
+        speed: 1.2 + (i % 3),
       });
     }
     return list;
@@ -142,20 +141,20 @@ function CheapClouds({ fieldRef }: { fieldRef: React.MutableRefObject<WeatherFie
     if (!group.current) return;
     const f = fieldRef.current;
     const cov = f.cloudCoverage;
-    const baseY = 160 - f.cloudLow * 95; // fog/storm sit lower
+    const baseY = 220 - f.cloudLow * 30;
     group.current.position.set(camera.position.x, 0, camera.position.z);
-    group.current.visible = cov > 0.04;
+    group.current.visible = cov > 0.06;
 
     for (let i = 0; i < group.current.children.length; i++) {
       const child = group.current.children[i] as THREE.Mesh;
       const spd = planes[i]?.speed ?? 2;
-      child.position.y = baseY + (i % 4) * (18 - f.cloudLow * 8);
-      child.position.x += Math.sin(state.clock.elapsedTime * 0.05 + i) * spd * dt * 0.15;
-      child.position.z += Math.cos(state.clock.elapsedTime * 0.04 + i) * spd * dt * 0.12;
+      child.position.y = baseY + (i % 3) * 12;
+      child.position.x += Math.sin(state.clock.elapsedTime * 0.04 + i) * spd * dt * 0.1;
+      child.position.z += Math.cos(state.clock.elapsedTime * 0.03 + i) * spd * dt * 0.08;
       const m = mats.current[i];
       if (m) {
         m.color.set(f.cloudColor);
-        m.opacity = Math.min(0.82, 0.12 + cov * 0.75);
+        m.opacity = Math.min(0.22, 0.04 + cov * 0.35);
       }
     }
   });
@@ -163,20 +162,62 @@ function CheapClouds({ fieldRef }: { fieldRef: React.MutableRefObject<WeatherFie
   return (
     <group ref={group}>
       {planes.map((p, i) => (
-        <mesh key={i} position={p.pos} scale={p.scale} rotation={[-Math.PI / 2.35, 0, i * 0.25]}>
+        <mesh key={i} position={p.pos} scale={p.scale} rotation={[-Math.PI / 2.4, 0, i * 0.3]}>
           <planeGeometry args={[1, 1]} />
           <meshBasicMaterial
             ref={(m) => {
               if (m) mats.current[i] = m;
             }}
-            color="#e4eaf2"
+            color="#f2f6fb"
             transparent
-            opacity={0.2}
+            opacity={0.1}
             depthWrite={false}
             side={THREE.DoubleSide}
           />
         </mesh>
       ))}
     </group>
+  );
+}
+
+function DrawnCloud({ cloud }: { cloud: SkyCloudAsset }) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const { camera } = useThree();
+
+  const texture = useMemo(() => {
+    const grid = decodeSketch(cloud.sketch);
+    const data = new Uint8Array(SKETCH_GRID * SKETCH_GRID * 4);
+    for (let i = 0; i < SKETCH_GRID * SKETCH_GRID; i++) {
+      const ink = grid[i] ?? 0;
+      const a = Math.min(230, Math.round(ink * 230));
+      data[i * 4] = 245;
+      data[i * 4 + 1] = 248;
+      data[i * 4 + 2] = 252;
+      data[i * 4 + 3] = a;
+    }
+    const tex = new THREE.DataTexture(data, SKETCH_GRID, SKETCH_GRID, THREE.RGBAFormat);
+    tex.needsUpdate = true;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    tex.flipY = true;
+    return tex;
+  }, [cloud.sketch]);
+
+  useFrame(() => {
+    if (!meshRef.current) return;
+    meshRef.current.lookAt(camera.position);
+  });
+
+  return (
+    <mesh ref={meshRef} position={[cloud.x, 150, cloud.z]} scale={[100, 62, 1]}>
+      <planeGeometry args={[1, 1]} />
+      <meshBasicMaterial
+        map={texture}
+        transparent
+        depthWrite={false}
+        side={THREE.DoubleSide}
+        opacity={0.9}
+      />
+    </mesh>
   );
 }
