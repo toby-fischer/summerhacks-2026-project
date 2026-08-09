@@ -1,6 +1,6 @@
 // app/WeatherFX.tsx
 //
-// Shared daytime sky: soft ambient clouds + player-drawn clouds.
+// Bright daytime sky + soft ambient clouds + player-drawn clouds.
 'use client';
 
 import { useMemo, useRef } from 'react';
@@ -25,12 +25,12 @@ const DEFAULT_FIELD: WeatherField = {
   overcast: 0,
   fog: 0,
   storm: 0,
-  fogDensity: 0.0022,
-  fogColor: '#b9c6d6',
+  fogDensity: 0.0012,
+  fogColor: '#c8daf0',
   lightDim: 1,
-  cloudCoverage: 0.12,
-  cloudColor: '#e4eaf2',
-  cloudLow: 0.15,
+  cloudCoverage: 0.04,
+  cloudColor: '#f2f6fb',
+  cloudLow: 0.1,
 };
 
 function lerpHex(a: string, b: string, t: number): string {
@@ -88,25 +88,26 @@ export function WeatherSystem({
 
     if (sunRef.current) {
       sunRef.current.position.set(...SUN_POSITION);
-      sunRef.current.intensity = 2.0 * s.lightDim;
-      sunRef.current.color.set('#fff3e2');
+      sunRef.current.intensity = 2.2 * s.lightDim;
+      sunRef.current.color.set('#fff6e8');
     }
     if (ambientRef.current) {
-      ambientRef.current.intensity = 0.65 * s.lightDim;
+      ambientRef.current.intensity = 0.7 * s.lightDim;
     }
   });
 
-  const turbidity = 3.5 + fieldRef.current.storm * 1.5 + fieldRef.current.fog * 0.8;
+  // Low turbidity + higher rayleigh = clearer blue sky, not milky gray.
+  const turbidity = 2 + fieldRef.current.storm * 1.2 + fieldRef.current.fog * 0.6;
 
   return (
     <>
-      <Sky sunPosition={SUN_POSITION} turbidity={turbidity} rayleigh={2.6} />
-      <ambientLight ref={ambientRef} intensity={0.65} />
+      <Sky sunPosition={SUN_POSITION} turbidity={turbidity} rayleigh={2.8} mieCoefficient={0.004} />
+      <ambientLight ref={ambientRef} intensity={0.7} />
       <directionalLight
         ref={sunRef}
         position={SUN_POSITION}
-        intensity={2.0}
-        color="#fff3e2"
+        intensity={2.2}
+        color="#fff6e8"
         castShadow
       />
       <CheapClouds fieldRef={fieldRef} />
@@ -124,13 +125,13 @@ function CheapClouds({ fieldRef }: { fieldRef: React.MutableRefObject<WeatherFie
 
   const planes = useMemo(() => {
     const list: { pos: [number, number, number]; scale: [number, number, number]; speed: number }[] = [];
-    for (let i = 0; i < 7; i++) {
-      const ang = (i / 7) * Math.PI * 2 + (i % 3) * 0.2;
-      const r = 160 + (i % 4) * 80;
+    for (let i = 0; i < 5; i++) {
+      const ang = (i / 5) * Math.PI * 2 + (i % 3) * 0.25;
+      const r = 200 + (i % 3) * 90;
       list.push({
         pos: [Math.cos(ang) * r, 0, Math.sin(ang) * r],
-        scale: [120 + (i % 3) * 40, 1, 55 + (i % 2) * 25],
-        speed: 1.5 + (i % 4),
+        scale: [100 + (i % 3) * 35, 1, 45 + (i % 2) * 20],
+        speed: 1.2 + (i % 3),
       });
     }
     return list;
@@ -140,20 +141,20 @@ function CheapClouds({ fieldRef }: { fieldRef: React.MutableRefObject<WeatherFie
     if (!group.current) return;
     const f = fieldRef.current;
     const cov = f.cloudCoverage;
-    const baseY = 200 - f.cloudLow * 40;
+    const baseY = 220 - f.cloudLow * 30;
     group.current.position.set(camera.position.x, 0, camera.position.z);
-    group.current.visible = cov > 0.05;
+    group.current.visible = cov > 0.06;
 
     for (let i = 0; i < group.current.children.length; i++) {
       const child = group.current.children[i] as THREE.Mesh;
       const spd = planes[i]?.speed ?? 2;
-      child.position.y = baseY + (i % 3) * 14;
-      child.position.x += Math.sin(state.clock.elapsedTime * 0.05 + i) * spd * dt * 0.12;
-      child.position.z += Math.cos(state.clock.elapsedTime * 0.04 + i) * spd * dt * 0.1;
+      child.position.y = baseY + (i % 3) * 12;
+      child.position.x += Math.sin(state.clock.elapsedTime * 0.04 + i) * spd * dt * 0.1;
+      child.position.z += Math.cos(state.clock.elapsedTime * 0.03 + i) * spd * dt * 0.08;
       const m = mats.current[i];
       if (m) {
         m.color.set(f.cloudColor);
-        m.opacity = Math.min(0.28, 0.06 + cov * 0.4);
+        m.opacity = Math.min(0.22, 0.04 + cov * 0.35);
       }
     }
   });
@@ -161,15 +162,15 @@ function CheapClouds({ fieldRef }: { fieldRef: React.MutableRefObject<WeatherFie
   return (
     <group ref={group}>
       {planes.map((p, i) => (
-        <mesh key={i} position={p.pos} scale={p.scale} rotation={[-Math.PI / 2.35, 0, i * 0.25]}>
+        <mesh key={i} position={p.pos} scale={p.scale} rotation={[-Math.PI / 2.4, 0, i * 0.3]}>
           <planeGeometry args={[1, 1]} />
           <meshBasicMaterial
             ref={(m) => {
               if (m) mats.current[i] = m;
             }}
-            color="#e4eaf2"
+            color="#f2f6fb"
             transparent
-            opacity={0.2}
+            opacity={0.1}
             depthWrite={false}
             side={THREE.DoubleSide}
           />

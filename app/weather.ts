@@ -1,7 +1,7 @@
 // app/weather.ts
 //
-// Pure blend over weather contributions. Mood is cloudy sky + fog/light —
-// no precipitation. Legacy DB values (rain/snow) map into cloudy types.
+// Pure blend over weather contributions. Mood is light cloudy sky + fog —
+// kept soft so the scene stays bright. Legacy DB values (rain/snow) map in.
 
 export type WeatherCondition = 'clear' | 'light' | 'overcast' | 'storm' | 'fog';
 
@@ -65,18 +65,21 @@ export interface WeatherField {
   cloudLow: number;
 }
 
+/** Fixed bright daytime sun — no night cycle washing the sky gray. */
+export const SUN_POSITION: [number, number, number] = [90, 110, -100];
+
 const BASE: WeatherField = {
   clear: 1,
   light: 0,
   overcast: 0,
   fog: 0,
   storm: 0,
-  fogDensity: 0.0022,
-  fogColor: '#b9c6d6',
+  fogDensity: 0.0012,
+  fogColor: '#c8daf0',
   lightDim: 1,
-  cloudCoverage: 0.12,
-  cloudColor: '#e4eaf2',
-  cloudLow: 0.15,
+  cloudCoverage: 0.04,
+  cloudColor: '#f2f6fb',
+  cloudLow: 0.1,
 };
 
 function bucket(condition: WeatherCondition): keyof Pick<
@@ -88,7 +91,7 @@ function bucket(condition: WeatherCondition): keyof Pick<
 
 /**
  * Distance-weighted blend of nearby weather cells at world (x, z).
- * Outside all radii → calm default day field.
+ * Outside all radii → calm bright day. Soft caps so weather never grays out the sky.
  */
 export function blendWeatherAt(assets: WeatherAsset[], x: number, z: number): WeatherField {
   const acc = { clear: 0, light: 0, overcast: 0, fog: 0, storm: 0 };
@@ -110,30 +113,28 @@ export function blendWeatherAt(assets: WeatherAsset[], x: number, z: number): We
   const fogN = acc.fog / weightSum;
   const stormN = acc.storm / weightSum;
 
-  // Keep everything in "slightly cloudy" territory — never crush visibility.
   const cloudCoverage = Math.min(
-    0.45,
-    0.06 + lightN * 0.18 + overcastN * 0.28 + stormN * 0.35 + fogN * 0.22,
+    0.35,
+    0.04 + lightN * 0.14 + overcastN * 0.22 + stormN * 0.28 + fogN * 0.16,
   );
-  const cloudLow = Math.min(0.35, lightN * 0.08 + overcastN * 0.15 + stormN * 0.2 + fogN * 0.3);
-  const foggy = Math.min(1, fogN * 0.6 + stormN * 0.15 + overcastN * 0.08);
-  const fogDensity = 0.0022 + foggy * 0.0018 + stormN * 0.0008;
+  const cloudLow = Math.min(0.3, lightN * 0.06 + overcastN * 0.12 + stormN * 0.16 + fogN * 0.22);
+  const foggy = Math.min(1, fogN * 0.45 + stormN * 0.12 + overcastN * 0.06);
+  const fogDensity = 0.0012 + foggy * 0.0012 + stormN * 0.0005;
   const lightDim = Math.max(
-    0.88,
-    1 - stormN * 0.1 - fogN * 0.06 - overcastN * 0.04 - lightN * 0.02,
+    0.9,
+    1 - stormN * 0.08 - fogN * 0.05 - overcastN * 0.03 - lightN * 0.015,
   );
 
-  let fogColor = '#b9c6d6';
-  if (stormN > 0.4) fogColor = '#a8b4c2';
-  else if (fogN > 0.4) fogColor = '#b4bcc6';
-  else if (overcastN > 0.35) fogColor = '#b0bcc8';
+  let fogColor = '#c8daf0';
+  if (stormN > 0.4) fogColor = '#b4c4d4';
+  else if (fogN > 0.4) fogColor = '#c0ccd8';
+  else if (overcastN > 0.35) fogColor = '#c4d2e2';
 
-  // Always pale — dark cloud sheets were crushing the scene.
-  let cloudColor = '#eef2f7';
-  if (stormN > overcastN && stormN > fogN) cloudColor = '#c5ced8';
-  else if (fogN > overcastN) cloudColor = '#d8dee6';
-  else if (overcastN > lightN) cloudColor = '#dde4ec';
-  else if (lightN > clearN) cloudColor = '#e8eef5';
+  let cloudColor = '#f5f8fc';
+  if (stormN > overcastN && stormN > fogN) cloudColor = '#d8e0ea';
+  else if (fogN > overcastN) cloudColor = '#e4eaf0';
+  else if (overcastN > lightN) cloudColor = '#e8eef6';
+  else if (lightN > clearN) cloudColor = '#eef3f9';
 
   return {
     clear: clearN,
@@ -150,15 +151,12 @@ export function blendWeatherAt(assets: WeatherAsset[], x: number, z: number): We
   };
 }
 
-/** Fixed daytime sun position for the shared sky. */
-export const SUN_POSITION: [number, number, number] = [90, 95, -120];
-
 export function muteForInterior(field: WeatherField): WeatherField {
   return {
     ...field,
-    fogDensity: Math.min(field.fogDensity, 0.003),
-    cloudCoverage: field.cloudCoverage * 0.25,
-    lightDim: Math.max(field.lightDim, 0.7),
+    fogDensity: Math.min(field.fogDensity, 0.002),
+    cloudCoverage: field.cloudCoverage * 0.2,
+    lightDim: Math.max(field.lightDim, 0.85),
   };
 }
 

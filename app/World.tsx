@@ -2758,7 +2758,7 @@ export default function World() {
         dpr={[1, 2]}
         camera={{ position: [0, EYE, 40], fov: 72, near: 0.5, far: 3000 }}
         onCreated={({ scene }) => {
-          scene.fog = new THREE.FogExp2('#b9c6d6', 0.0022);
+          scene.fog = new THREE.FogExp2('#c8daf0', 0.0012);
         }}
       >
         <WeatherSystem
