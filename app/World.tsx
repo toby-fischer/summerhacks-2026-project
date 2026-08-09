@@ -1250,7 +1250,8 @@ function InteriorScene({
   const stairHole = useMemo<RectBox | null>(() => {
     const s = floorplan.stair;
     if (!s) return null;
-    return { cx: s.cx, cz: s.cz, halfW: s.halfW * 1.05, halfD: s.halfD * 1.05 };
+    // Elongate the depth multiplier to provide headroom approach clearance
+    return { cx: s.cx, cz: s.cz, halfW: s.halfW * 1.05, halfD: s.halfD * 1.6 };
   }, [floorplan.stair]);
 
   const floorSlab = useMemo<BoxTransform[]>(
@@ -2241,34 +2242,61 @@ function Walker({
     const floorBase = INTERIOR_Y_BASE + interior.floor * INTERIOR_FLOOR_H;
     let worldGroundY = floorBase;
 
-    const stair = floorplan.stair;
-    if (stair && Math.abs(lx - stair.cx) < stair.halfW && Math.abs(lz - stair.cz) < stair.halfD) {
-      if (!stairRef.current || stairRef.current.buildingId !== building.id) {
+  const stair = floorplan.stair;
+  if (stair && Math.abs(lx - stair.cx) < stair.halfW && Math.abs(lz - stair.cz) < stair.halfD) {
+    // Clear stale state on floor switch or initial stair entry
+    if (
+      !stairRef.current ||
+      stairRef.current.buildingId !== building.id ||
+      stairRef.current.enteredFloor !== interior.floor
+    ) {
+      const enteringFromSouth = lz >= stair.cz;
+      let direction: 'ascend' | 'descend' | null = null;
+      
+      if (enteringFromSouth && stair.up) direction = 'ascend';
+      else if (!enteringFromSouth && stair.down) direction = 'descend';
+      else if (stair.up) direction = 'ascend';
+      else if (stair.down) direction = 'descend';
+
+      if (direction) {
         stairRef.current = {
           buildingId: building.id,
           enteredFloor: interior.floor,
           enteredZ: lz,
-          dir: lz >= stair.cz ? 'ascend' : 'descend',
+          dir: direction,
         };
       }
+    }
+
+    if (stairRef.current) {
       const s = stairRef.current;
-      const runLength = Math.max(0.5, stair.halfD * 2);
+      const stairLength = stair.halfD * 2;
+      const southEdge = stair.cz + stair.halfD;
+      const northEdge = stair.cz - stair.halfD;
+
       if (s.dir === 'ascend' && stair.up) {
-        const t = clamp((s.enteredZ - lz) / runLength, 0, 1);
-        worldGroundY = INTERIOR_Y_BASE + s.enteredFloor * INTERIOR_FLOOR_H + t * INTERIOR_FLOOR_H;
-        if (t >= 0.999 && interior.floor === s.enteredFloor) {
-          onInteriorChange({ buildingId: building.id, floor: s.enteredFloor + 1 });
+        // Ascending: fixed south-to-north span progress
+        const t = clamp((southEdge - lz) / stairLength, 0, 1);
+        worldGroundY = INTERIOR_Y_BASE + interior.floor * INTERIOR_FLOOR_H + t * INTERIOR_FLOOR_H;
+        
+        if (t >= 0.85) {
+          stairRef.current = null;
+          onInteriorChange({ buildingId: building.id, floor: interior.floor + 1 });
         }
       } else if (s.dir === 'descend' && stair.down) {
-        const t = clamp((lz - s.enteredZ) / runLength, 0, 1);
-        worldGroundY = INTERIOR_Y_BASE + s.enteredFloor * INTERIOR_FLOOR_H - t * INTERIOR_FLOOR_H;
-        if (t >= 0.999 && interior.floor === s.enteredFloor) {
-          onInteriorChange({ buildingId: building.id, floor: s.enteredFloor - 1 });
+        // Descending: fixed north-to-south span progress
+        const t = clamp((lz - northEdge) / stairLength, 0, 1);
+        worldGroundY = INTERIOR_Y_BASE + interior.floor * INTERIOR_FLOOR_H - t * INTERIOR_FLOOR_H;
+        
+        if (t >= 0.85) {
+          stairRef.current = null;
+          onInteriorChange({ buildingId: building.id, floor: interior.floor - 1 });
         }
       }
-    } else {
-      stairRef.current = null;
     }
+  } else {
+    stairRef.current = null;
+  }
 
     camera.position.x = layout.cx + lx;
     camera.position.z = layout.cz + lz;

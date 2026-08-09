@@ -369,13 +369,22 @@ export function generateFloorplan(spec: BuildingSpec, floor: number): Floorplan 
   }
 
   const stairRoom = rects[stairRoomIdx];
-  const cellW = Math.min(STAIR_SIZE, stairRoom.maxX - stairRoom.minX - 0.6);
-  const cellD = Math.min(STAIR_SIZE, stairRoom.maxZ - stairRoom.minZ - 0.6);
+  const roomW = stairRoom.maxX - stairRoom.minX;
+  const roomD = stairRoom.maxZ - stairRoom.minZ;
+
+  // Push the stair cell against the back wall (minZ) to concentrate
+  // all remaining room space at the front (maxZ) for approach clearance.
+  const marginBack = 0.3;
+  const marginFront = 1.2;
+
+  const cellW = Math.min(STAIR_SIZE, roomW - 0.6);
+  const cellD = Math.min(STAIR_SIZE, roomD - marginBack - marginFront);
+
   const stair: StairCell | null =
     spec.floors > 1
       ? {
           cx: (stairRoom.minX + stairRoom.maxX) / 2,
-          cz: (stairRoom.minZ + stairRoom.maxZ) / 2,
+          cz: stairRoom.minZ + marginBack + (cellD / 2),
           halfW: Math.max(0.9, cellW / 2),
           halfD: Math.max(0.9, cellD / 2),
           up: floor < spec.floors - 1,
