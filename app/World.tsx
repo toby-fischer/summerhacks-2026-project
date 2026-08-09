@@ -59,7 +59,7 @@ const SKETCH_GRID = 64;
 const PATCH_SCALE = 300;
 const PATCH_MAX_H = 60;
 const EYE = 1.8;
-const PROXIMITY_AUDIO_DISTANCE = 15; // Max distance in meters to hear animal
+const PROXIMITY_AUDIO_DISTANCE = 50; // Max distance in meters to hear animal
 /** How far ahead of the player a new sketch lands — enough that even the
  *  largest generated building (~12.6m wide) can't spawn on top of them. */
 const SKETCH_SPAWN_DISTANCE = 14;
@@ -99,6 +99,8 @@ interface AnimalData {
   outlineSketch: string;
   patternSketch: string;
   soundDataUrl?: string | null;
+  path?: { x: number; z: number }[] | null;
+  speed?: number; // Add this line
 }
 
 interface BuildingAsset {
@@ -189,6 +191,14 @@ function clamp(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, v));
 }
 
+function hexToRgba(hex: string, alpha: number): string {
+  const n = parseInt(hex.replace('#', ''), 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 function finiteOr(v: number, fallback: number): number {
   return Number.isFinite(v) ? v : fallback;
 }
@@ -232,7 +242,7 @@ function PatchMesh({ patch, terrain }: { patch: Patch; terrain: TerrainData }) {
 
       const h = (terrain.heights[i] ?? 0) * falloff;
       pos.setY(i, h);
-      terrain.heights[i] = h; // keep heightAt() consistent with the mesh
+      terrain.heights[i] = h;
 
       const t = h / terrain.maxHeight;
       if (t < 0.12) c.copy(sand).lerp(grass, t / 0.12);
@@ -1573,19 +1583,22 @@ interface Footprint {
 
 function AnimalMesh({
   animal,
-  groundY,
+  built,
 }: {
   animal: AnimalData;
-  groundY: number;
+  built: { patch: Patch; terrain: TerrainData }[];
 }) {
   const { camera } = useThree();
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const meshRef = useRef<THREE.Mesh>(null);
 
-  // Setup Audio Object
+  const pathIndex = useRef(0);
+  const pathProgress = useRef(0);
+
   useEffect(() => {
     if (!animal.soundDataUrl) return;
     const audio = new Audio(animal.soundDataUrl);
-    audio.loop = true; // Enable native looping
+    audio.loop = true;
     audioRef.current = audio;
 
     return () => {
@@ -1594,32 +1607,69 @@ function AnimalMesh({
     };
   }, [animal.soundDataUrl]);
 
-  // Handle continuous proximity volume updates and playback loop
-  useFrame(() => {
-    if (!audioRef.current) return;
+  useFrame((_, delta) => {
+    const currentX = meshRef.current ? meshRef.current.position.x : animal.x;
+    const currentZ = meshRef.current ? meshRef.current.position.z : animal.z;
 
-    const dx = camera.position.x - animal.x;
-    const dz = camera.position.z - animal.z;
-    const distance = Math.hypot(dx, dz);
+    if (audioRef.current) {
+      const distance = Math.hypot(camera.position.x - currentX, camera.position.z - currentZ);
+      const inRange = distance <= PROXIMITY_AUDIO_DISTANCE;
 
-    const inRange = distance <= PROXIMITY_AUDIO_DISTANCE;
-
-    if (inRange) {
-      // Attenuate volume dynamically based on distance
-      const volume = Math.max(0, 1 - distance / PROXIMITY_AUDIO_DISTANCE);
-      audioRef.current.volume = volume;
-
-      // Start looping if not already playing
-      if (audioRef.current.paused) {
-        audioRef.current.play().catch(() => {
-          // Playback blocked if user hasn't interacted with page yet
-        });
+      if (inRange) {
+        const volume = Math.max(0, 1 - distance / PROXIMITY_AUDIO_DISTANCE);
+        audioRef.current.volume = volume;
+        if (audioRef.current.paused) {
+          audioRef.current.play().catch(() => {});
+        }
+      } else {
+        if (!audioRef.current.paused) {
+          audioRef.current.pause();
+        }
       }
-    } else {
-      // Pause playback when out of range
-      if (!audioRef.current.paused) {
-        audioRef.current.pause();
+    }
+
+    if (meshRef.current && animal.path && animal.path.length > 1) {
+      const speed = animal.speed ?? 4.0; // Use dynamic speed here
+      let currIdx = pathIndex.current;
+      const p1 = animal.path[currIdx];
+      const p2 = animal.path[(currIdx + 1) % animal.path.length];
+
+      const diffX = p2.x - p1.x;
+      const diffZ = p2.z - p1.z;
+      const dist = Math.hypot(diffX, diffZ);
+
+      if (dist > 0.001) {
+        let progress = pathProgress.current + (speed * delta) / dist;
+        while (progress >= 1.0) {
+          progress -= 1.0;
+          currIdx = (currIdx + 1) % animal.path.length;
+        }
+
+        pathProgress.current = progress;
+        pathIndex.current = currIdx;
+
+        const currentP1 = animal.path[currIdx];
+        const currentP2 = animal.path[(currIdx + 1) % animal.path.length];
+
+        const nx = THREE.MathUtils.lerp(currentP1.x, currentP2.x, progress);
+        const nz = THREE.MathUtils.lerp(currentP1.z, currentP2.z, progress);
+
+        meshRef.current.position.x = nx;
+        meshRef.current.position.z = nz;
+
+        const targetRotation = Math.atan2(currentP2.x - currentP1.x, currentP2.z - currentP1.z);
+        let rotDiff = targetRotation - meshRef.current.rotation.y;
+        while (rotDiff > Math.PI) rotDiff -= Math.PI * 2;
+        while (rotDiff < -Math.PI) rotDiff += Math.PI * 2;
+        meshRef.current.rotation.y += rotDiff * Math.min(1, delta * 5);
+      } else {
+        // FIX: If the distance is negligible (e.g., player stood still), 
+        // skip immediately to the next point so the loop doesn't freeze.
+        pathIndex.current = (currIdx + 1) % animal.path.length;
+        pathProgress.current = 0;
       }
+
+      meshRef.current.position.y = groundAt(built, currentX, currentZ) + height / 2;
     }
   });
 
@@ -1730,24 +1780,16 @@ function AnimalMesh({
     let vertCount = 0;
 
     const addQuad = (
-      p0: [number, number, number],
-      p1: [number, number, number],
-      p2: [number, number, number],
-      p3: [number, number, number],
+      p0: [number, number, number], p1: [number, number, number],
+      p2: [number, number, number], p3: [number, number, number],
       norm: [number, number, number],
-      uv0: [number, number],
-      uv1: [number, number],
-      uv2: [number, number],
-      uv3: [number, number],
+      uv0: [number, number], uv1: [number, number],
+      uv2: [number, number], uv3: [number, number],
     ) => {
       positions.push(...p0, ...p1, ...p2, ...p3);
       normals.push(...norm, ...norm, ...norm, ...norm);
       uvs.push(...uv0, ...uv1, ...uv2, ...uv3);
-
-      indices.push(
-        vertCount, vertCount + 1, vertCount + 2,
-        vertCount, vertCount + 2, vertCount + 3,
-      );
+      indices.push(vertCount, vertCount + 1, vertCount + 2, vertCount, vertCount + 2, vertCount + 3);
       vertCount += 4;
     };
 
@@ -1767,55 +1809,12 @@ function AnimalMesh({
         const vMin = 1 - (y + 1) / SKETCH_GRID;
         const vMax = 1 - y / SKETCH_GRID;
 
-        // Front face (+Z)
-        addQuad(
-          [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
-          [0, 0, 1],
-          [uMin, vMin], [uMax, vMin], [uMax, vMax], [uMin, vMax],
-        );
-
-        // Back face (-Z)
-        addQuad(
-          [x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0],
-          [0, 0, -1],
-          [uMax, vMin], [uMin, vMin], [uMin, vMax], [uMax, vMax],
-        );
-
-        // Left face (-X)
-        if (!isSolid(x - 1, y)) {
-          addQuad(
-            [x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0],
-            [-1, 0, 0],
-            [uMin, vMin], [uMin, vMin], [uMin, vMax], [uMin, vMax],
-          );
-        }
-
-        // Right face (+X)
-        if (!isSolid(x + 1, y)) {
-          addQuad(
-            [x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1],
-            [1, 0, 0],
-            [uMax, vMin], [uMax, vMin], [uMax, vMax], [uMax, vMax],
-          );
-        }
-
-        // Top face (+Y)
-        if (!isSolid(x, y - 1)) {
-          addQuad(
-            [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0],
-            [0, 1, 0],
-            [uMin, vMax], [uMax, vMax], [uMax, vMax], [uMin, vMax],
-          );
-        }
-
-        // Bottom face (-Y)
-        if (!isSolid(x, y + 1)) {
-          addQuad(
-            [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1],
-            [0, -1, 0],
-            [uMin, vMin], [uMax, vMin], [uMax, vMin], [uMin, vMin],
-          );
-        }
+        addQuad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1], [uMin, vMin], [uMax, vMin], [uMax, vMax], [uMin, vMax]);
+        addQuad([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1], [uMax, vMin], [uMin, vMin], [uMin, vMax], [uMax, vMax]);
+        if (!isSolid(x - 1, y)) addQuad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0], [uMin, vMin], [uMin, vMin], [uMin, vMax], [uMin, vMax]);
+        if (!isSolid(x + 1, y)) addQuad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0], [uMax, vMin], [uMax, vMin], [uMax, vMax], [uMax, vMax]);
+        if (!isSolid(x, y - 1)) addQuad([x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0], [uMin, vMax], [uMax, vMax], [uMax, vMax], [uMin, vMax]);
+        if (!isSolid(x, y + 1)) addQuad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0], [uMin, vMin], [uMax, vMin], [uMax, vMin], [uMin, vMin]);
       }
     }
 
@@ -1831,9 +1830,7 @@ function AnimalMesh({
       geom.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
       geom.setIndex(indices);
       geom.computeBoundingBox();
-      if (geom.boundingBox) {
-        meshHeight = geom.boundingBox.max.y - geom.boundingBox.min.y;
-      }
+      if (geom.boundingBox) meshHeight = geom.boundingBox.max.y - geom.boundingBox.min.y;
       geom.center();
     }
 
@@ -1885,8 +1882,9 @@ function AnimalMesh({
 
   return (
     <mesh
+      ref={meshRef}
       geometry={geometry}
-      position={[animal.x, groundY + height / 2, animal.z]}
+      position={[animal.x, groundAt(built, animal.x, animal.z) + height / 2, animal.z]}
       castShadow
       receiveShadow
     >
@@ -1915,6 +1913,51 @@ function collidesAt(footprints: Footprint[], x: number, z: number, radius: numbe
 /** Interior wall segments are thin AABBs too — same collision test, different boxes. */
 function wallBoxToFootprint(w: { cx: number; cz: number; halfW: number; halfD: number }): Footprint {
   return { cx: w.cx, cz: w.cz, width: w.halfW * 2, depth: w.halfD * 2 };
+}
+
+/* ------------------------------------------------------------ path record --- */
+
+function PathRecorder({
+  isRecording,
+  onComplete,
+}: {
+  isRecording: boolean;
+  onComplete: (path: { x: number; z: number }[]) => void;
+}) {
+  const { camera } = useThree();
+  const path = useRef<{ x: number; z: number }[]>([]);
+  const timeAcc = useRef(0);
+  const totalTime = useRef(0);
+
+  useFrame((_, delta) => {
+    if (!isRecording) return;
+
+    totalTime.current += delta;
+    timeAcc.current += delta;
+
+    if (timeAcc.current > 0.1) {
+      path.current.push({ x: camera.position.x, z: camera.position.z });
+      timeAcc.current = 0;
+    }
+
+    if (totalTime.current >= 5.0) {
+      path.current.push({ x: camera.position.x, z: camera.position.z });
+      onComplete([...path.current]);
+      path.current = [];
+      timeAcc.current = 0;
+      totalTime.current = 0;
+    }
+  });
+
+  useEffect(() => {
+    if (!isRecording) {
+      path.current = [];
+      timeAcc.current = 0;
+      totalTime.current = 0;
+    }
+  }, [isRecording]);
+
+  return null;
 }
 
 /* ------------------------------------------------------------ the plain --- */
@@ -2001,6 +2044,7 @@ function Walker({
   const move = useRef({ f: false, b: false, l: false, r: false, sprint: false });
   const dir = useRef(new THREE.Vector3());
   const lastSend = useRef(0);
+  const locked = useRef(false);
   const interiorRef = useRef(interior);
   interiorRef.current = interior;
 
@@ -2040,14 +2084,18 @@ function Walker({
         else forward.normalize();
         return [camera.position.x + forward.x * distance, camera.position.z + forward.z * distance];
       };
-      if (e.code === 'KeyE' && !interiorRef.current) {
-        e.preventDefault();
-        const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
-        onOpenDraw(x, z);
-      } else if (e.code === 'KeyR' && !interiorRef.current) {
-        e.preventDefault();
-        const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
-        onOpenAnimalDraw(x, z);
+      if (locked.current) {
+        if (e.code === 'KeyE' && !interiorRef.current) {
+          e.preventDefault();
+          document.exitPointerLock();
+          const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
+          onOpenDraw(x, z);
+        } else if (e.code === 'KeyR' && !interiorRef.current) {
+          e.preventDefault();
+          document.exitPointerLock();
+          const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
+          onOpenAnimalDraw(x, z);
+        }
       }
     };
     const up = (e: KeyboardEvent) => set(e.code, false);
@@ -2228,7 +2276,12 @@ function Walker({
   // Fully unmount while drawing so a stray pointer/keyboard event can't
   // re-trigger a lock underneath the modal.
   if (isModalOpen) return null;
-  return <PointerLockControls />;
+  return (
+    <PointerLockControls
+      onLock={() => (locked.current = true)}
+      onUnlock={() => (locked.current = false)}
+    />
+  );
 }
 
 /* ----------------------------------------------------------------- page --- */
@@ -2244,6 +2297,9 @@ export default function World() {
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
   );
+
+  const [isRecordingPath, setIsRecordingPath] = useState(false);
+  const [recordedPath, setRecordedPath] = useState<{ x: number; z: number }[] | null>(null);
 
   const selfId = useMemo(makeSelfId, []);
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -2359,6 +2415,8 @@ export default function World() {
         outlineSketch: props.outlineSketch,
         patternSketch: props.patternSketch,
         soundDataUrl: typeof props.soundDataUrl === 'string' ? props.soundDataUrl : null,
+        path: Array.isArray(props.path) ? (props.path as { x: number; z: number }[]) : null,
+        speed: typeof props.speed === 'number' ? props.speed : undefined, // Add this line
       };
     };
 
@@ -2471,7 +2529,7 @@ export default function World() {
         .then(({ data, error }) => {
           setPatches((prev) => {
             const without = prev.filter((p) => p.id !== tempId);
-            if (error || !data?.length) return without; // roll back on failure
+            if (error || !data?.length) return without;
             const row = data[0] as Record<string, unknown>;
             const id = String(row.id);
             cache.current.set(id, cache.current.get(tempId) ?? terrainFor({ id, x, z, sketch, seed }));
@@ -2557,6 +2615,8 @@ export default function World() {
       outlineGrid: Uint8Array,
       patternGrid: Uint8Array,
       soundDataUrl: string | null,
+      path: { x: number; z: number }[] | null,
+      speed: number, // Add speed parameter
       x: number,
       z: number,
     ) => {
@@ -2564,14 +2624,18 @@ export default function World() {
       const patternSketch = encodeColorSketch(patternGrid);
       const tempId = `temp-animal-${Math.random() * 1e9}`;
 
-      setAnimals((prev) => [...prev, { id: tempId, x, z, outlineSketch, patternSketch, soundDataUrl }]);
+      // Add speed to local state
+      setAnimals((prev) => [...prev, { id: tempId, x, z, outlineSketch, patternSketch, soundDataUrl, path, speed }]);
       setAnimalDrawAt(null);
+      setIsRecordingPath(false);
+      setRecordedPath(null);
 
       if (!supabase) return;
 
+      // Add speed to database properties
       supabase
         .from('world_assets')
-        .insert({ x, z, type: 'animal', properties: { outlineSketch, patternSketch, soundDataUrl } })
+        .insert({ x, z, type: 'animal', properties: { outlineSketch, patternSketch, soundDataUrl, path, speed } })
         .select()
         .then(({ data, error }) => {
           setAnimals((prev) => {
@@ -2581,7 +2645,7 @@ export default function World() {
             const id = String(row.id);
             return without.some((a) => a.id === id)
               ? without
-              : [...without, { id, x, z, outlineSketch, patternSketch, soundDataUrl }];
+              : [...without, { id, x, z, outlineSketch, patternSketch, soundDataUrl, path, speed }];
           });
         });
     },
@@ -2595,12 +2659,12 @@ export default function World() {
         ? 'connecting…'
         : 'offline — solo world';
 
-  const isModalOpen = drawAt !== null || animalDrawAt !== null;
+  const isModalOpen = drawAt !== null || (animalDrawAt !== null && !isRecordingPath);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
       <Canvas
-        shadows
+        shadows={{ type: THREE.PCFShadowMap }}
         dpr={[1, 2]}
         camera={{ position: [0, EYE, 40], fov: 72, near: 0.5, far: 3000 }}
         onCreated={({ scene }) => {
@@ -2619,7 +2683,7 @@ export default function World() {
         <BuildingKit layouts={buildingLayouts} />
 
         {animals.map((a) => (
-          <AnimalMesh key={a.id} animal={a} groundY={groundAt(built, a.x, a.z)} />
+          <AnimalMesh key={a.id} animal={a} built={built} />
         ))}
         {activeInterior && (
           <InteriorScene
@@ -2642,6 +2706,14 @@ export default function World() {
             return <Wisp key={t.id} traveller={placed} />;
           })}
 
+        <PathRecorder
+          isRecording={isRecordingPath}
+          onComplete={(path) => {
+            setIsRecordingPath(false);
+            setRecordedPath(path);
+          }}
+        />
+
         <Walker
           built={built}
           footprints={buildingFootprints}
@@ -2652,7 +2724,11 @@ export default function World() {
           channel={channelRef}
           selfId={selfId}
           onOpenDraw={(x, z) => setDrawAt({ x, z })}
-          onOpenAnimalDraw={(x, z) => setAnimalDrawAt({ x, z })}
+          onOpenAnimalDraw={(x, z) => {
+            setAnimalDrawAt({ x, z });
+            setRecordedPath(null);
+            setIsRecordingPath(false);
+          }}
           isModalOpen={isModalOpen}
         />
       </Canvas>
@@ -2692,9 +2768,15 @@ export default function World() {
 
       {animalDrawAt && (
         <AnimalDrawPanel
-          onCancel={() => setAnimalDrawAt(null)}
-          onCommit={(outlineGrid, patternGrid, soundDataUrl) =>
-            commitAnimal(outlineGrid, patternGrid, soundDataUrl, animalDrawAt.x, animalDrawAt.z)
+          isRecordingPath={isRecordingPath}
+          onStartPathRecord={() => setIsRecordingPath(true)}
+          recordedPath={recordedPath}
+          onCancel={() => {
+            setAnimalDrawAt(null);
+            setIsRecordingPath(false);
+          }}
+          onCommit={(outlineGrid, patternGrid, soundDataUrl, path, speed) =>
+            commitAnimal(outlineGrid, patternGrid, soundDataUrl, path, speed, animalDrawAt.x, animalDrawAt.z)
           }
         />
       )}
@@ -2715,6 +2797,8 @@ function DrawPanel({
   const drawing = useRef(false);
   const [mode, setMode] = useState<'terrain' | 'building'>('terrain');
   const [error, setError] = useState<string | null>(null);
+  const [color, setColor] = useState('#000000');
+  const [markerSize, setMarkerSize] = useState(28);
 
   const clear = useCallback(() => {
     const ctx = canvasRef.current?.getContext('2d');
@@ -2739,23 +2823,24 @@ function DrawPanel({
 
     if (mode === 'terrain') {
       // Soft wide brush: gradients give the heightmap slopes to work with,
-      // where a hard 1px pen produces a wall.
-      const g = ctx.createRadialGradient(x, y, 0, x, y, 28);
-      g.addColorStop(0, 'rgba(0,0,0,0.9)');
-      g.addColorStop(1, 'rgba(0,0,0,0)');
+      // where a hard 1px pen produces a wall. Stroke color feeds the same
+      // luminance-to-height formula in submit(), so darker picks raise more.
+      const g = ctx.createRadialGradient(x, y, 0, x, y, markerSize);
+      g.addColorStop(0, hexToRgba(color, 0.9));
+      g.addColorStop(1, hexToRgba(color, 0));
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.arc(x, y, 28, 0, Math.PI * 2);
+      ctx.arc(x, y, markerSize, 0, Math.PI * 2);
       ctx.fill();
       return;
     }
 
-    // Building mode uses a tighter brush so silhouette proportions stay true.
+    // Building mode uses a tighter, fixed brush so silhouette proportions stay true.
     ctx.fillStyle = 'rgba(0,0,0,0.96)';
     ctx.beginPath();
     ctx.arc(x, y, 12, 0, Math.PI * 2);
     ctx.fill();
-  }, [mode]);
+  }, [mode, color, markerSize]);
 
   const submit = useCallback(() => {
     const c = canvasRef.current;
@@ -2834,6 +2919,42 @@ function DrawPanel({
           </button>
         </div>
 
+        {mode === 'terrain' ? (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+            <div className="flex flex-wrap gap-1.5">
+              {COLOR_PALETTE.map((c) => (
+                <button
+                  key={c.value}
+                  onClick={() => setColor(c.value)}
+                  title={c.name}
+                  className={`h-6 w-6 rounded-full border transition-transform ${
+                    color === c.value
+                      ? 'scale-110 border-white ring-2 ring-white/50'
+                      : 'border-transparent hover:scale-105'
+                  }`}
+                  style={{ backgroundColor: c.value }}
+                />
+              ))}
+            </div>
+
+            <div className="flex items-center gap-1">
+              {MARKER_SIZES.map((s) => (
+                <button
+                  key={s.label}
+                  onClick={() => setMarkerSize(s.size)}
+                  className={`h-7 w-7 rounded-md text-xs font-semibold ${
+                    markerSize === s.size
+                      ? 'bg-white text-black'
+                      : 'bg-white/10 text-white/70 hover:bg-white/20'
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         <canvas
           ref={canvasRef}
           width={512}
@@ -2879,15 +3000,24 @@ function DrawPanel({
 export function AnimalDrawPanel({
   onCommit,
   onCancel,
+  isRecordingPath,
+  onStartPathRecord,
+  recordedPath,
 }: {
   onCommit: (
     outlineGrid: Uint8Array,
     patternGrid: Uint8Array,
     soundDataUrl: string | null,
+    path: { x: number; z: number }[] | null,
+    speed: number, // Add speed to prop type
   ) => void;
   onCancel: () => void;
+  isRecordingPath?: boolean;
+  onStartPathRecord?: () => void;
+  recordedPath?: { x: number; z: number }[] | null;
 }) {
-  const [step, setStep] = useState<'outline' | 'pattern' | 'sound'>('outline');
+  const [step, setStep] = useState<'outline' | 'pattern' | 'sound' | 'path'>('outline');
+  const [speed, setSpeed] = useState(4.0);
   const [outlineGrid, setOutlineGrid] = useState<Uint8Array | null>(null);
   const [patternGrid, setPatternGrid] = useState<Uint8Array | null>(null);
 
@@ -2895,6 +3025,7 @@ export function AnimalDrawPanel({
   const [isRecording, setIsRecording] = useState(false);
   const [timeLeft, setTimeLeft] = useState(5);
   const [soundDataUrl, setSoundDataUrl] = useState<string | null>(null);
+  const [pathTimeLeft, setPathTimeLeft] = useState(5);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -2913,7 +3044,17 @@ export function AnimalDrawPanel({
     if (!ctx) return;
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, 512, 512);
-  }, []); // Keep empty array so step transition doesn't wipe canvas
+  }, []);
+
+  useEffect(() => {
+    if (isRecordingPath) {
+      setPathTimeLeft(5);
+      const timer = setInterval(() => {
+        setPathTimeLeft((prev) => prev - 1);
+      }, 1000);
+      return () => clearInterval(timer);
+    }
+  }, [isRecordingPath]);
 
   const getCanvasCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const c = canvasRef.current;
@@ -3076,10 +3217,32 @@ export function AnimalDrawPanel({
     setStep('sound');
   };
 
+  const handleNextToPath = () => {
+    setStep('path');
+  };
+
+  const handleStartPathRecord = () => {
+    if (onStartPathRecord) {
+      onStartPathRecord();
+      const canvas = document.querySelector('canvas');
+      if (canvas) canvas.requestPointerLock();
+    }
+  };
+
   const handleDone = () => {
     if (!outlineGrid || !patternGrid) return;
-    onCommit(outlineGrid, patternGrid, soundDataUrl);
+    onCommit(outlineGrid, patternGrid, soundDataUrl, recordedPath || null, speed);
   };
+
+  if (isRecordingPath) {
+    return (
+      <div className="pointer-events-none absolute inset-0 z-50 flex items-start justify-center pt-24">
+        <div className="rounded-full bg-red-500/90 px-6 py-3 text-lg font-bold text-white shadow-lg animate-pulse">
+          🔴 Recording Path... {pathTimeLeft > 0 ? pathTimeLeft : 0}s
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -3092,59 +3255,61 @@ export function AnimalDrawPanel({
           {step === 'outline' && '1. Draw Animal Outline'}
           {step === 'pattern' && '2. Draw Animal Pattern'}
           {step === 'sound' && '3. Add Animal Sound'}
+          {step === 'path' && '4. Record Animal Path'}
         </h2>
         <p className="mt-1 text-sm text-white/60">
           {step === 'outline' && 'Sketch the profile silhouette of your creature.'}
           {step === 'pattern' && 'Paint spots, stripes, or skin details onto the form.'}
           {step === 'sound' && 'Record a 5-second sound or upload an audio file for your animal.'}
+          {step === 'path' && 'Walk a route for 5 seconds that your animal will endlessly patrol.'}
         </p>
 
-        {step !== 'sound' && (
+        {(step === 'outline' || step === 'pattern') && (
           <>
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
-          <div className="flex flex-wrap gap-1.5">
-            {COLOR_PALETTE.map((c) => (
-              <button
-                key={c.value}
-                onClick={() => setColor(c.value)}
-                title={c.name}
-                className={`h-6 w-6 rounded-full border transition-transform ${
-                  color === c.value
-                    ? 'scale-110 border-white ring-2 ring-white/50'
-                    : 'border-transparent hover:scale-105'
-                }`}
-                style={{ backgroundColor: c.value }}
-              />
-            ))}
-          </div>
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+              <div className="flex flex-wrap gap-1.5">
+                {COLOR_PALETTE.map((c) => (
+                  <button
+                    key={c.value}
+                    onClick={() => setColor(c.value)}
+                    title={c.name}
+                    className={`h-6 w-6 rounded-full border transition-transform ${
+                      color === c.value
+                        ? 'scale-110 border-white ring-2 ring-white/50'
+                        : 'border-transparent hover:scale-105'
+                    }`}
+                    style={{ backgroundColor: c.value }}
+                  />
+                ))}
+              </div>
 
-          <div className="flex items-center gap-1">
-            {MARKER_SIZES.map((s) => (
-              <button
-                key={s.label}
-                onClick={() => setMarkerSize(s.size)}
-                className={`h-7 w-7 rounded-md text-xs font-semibold ${
-                  markerSize === s.size
-                    ? 'bg-white text-black'
-                    : 'bg-white/10 text-white/70 hover:bg-white/20'
-                }`}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-        </div>
+              <div className="flex items-center gap-1">
+                {MARKER_SIZES.map((s) => (
+                  <button
+                    key={s.label}
+                    onClick={() => setMarkerSize(s.size)}
+                    className={`h-7 w-7 rounded-md text-xs font-semibold ${
+                      markerSize === s.size
+                        ? 'bg-white text-black'
+                        : 'bg-white/10 text-white/70 hover:bg-white/20'
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-        <canvas
-          ref={canvasRef}
-          width={512}
-          height={512}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={stopDrawing}
-          onPointerLeave={stopDrawing}
-          className="mt-3 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
-        />
+            <canvas
+              ref={canvasRef}
+              width={512}
+              height={512}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={stopDrawing}
+              onPointerLeave={stopDrawing}
+              className="mt-3 aspect-square w-full cursor-crosshair touch-none rounded-lg bg-white"
+            />
           </>
         )}
 
@@ -3172,12 +3337,12 @@ export function AnimalDrawPanel({
               <div className="flex flex-col items-center gap-4 w-full">
                 <div className="flex items-center gap-6">
                   <div className="flex flex-col items-center">
-                <button
-                  onClick={startRecording}
-                  className="flex h-16 w-16 items-center justify-center rounded-full bg-amber-500 text-2xl text-neutral-950 transition-transform hover:scale-105"
-                >
-                  🎙️
-                </button>
+                    <button
+                      onClick={startRecording}
+                      className="flex h-16 w-16 items-center justify-center rounded-full bg-amber-500 text-2xl text-neutral-950 transition-transform hover:scale-105"
+                    >
+                      🎙️
+                    </button>
                     <span className="mt-2 text-xs text-white/70">Record 5s</span>
                   </div>
 
@@ -3193,9 +3358,56 @@ export function AnimalDrawPanel({
                         className="hidden"
                       />
                     </label>
-                    <span className="mt-2 text-xs text-white/70">Upload Audio File</span>
+                    <span className="mt-2 text-xs text-white/70">Upload Audio</span>
                   </div>
                 </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === 'path' && (
+          <div className="mt-6 flex flex-col items-center justify-center space-y-4 rounded-lg border border-white/10 bg-black/40 p-8">
+            {recordedPath ? (
+              <div className="text-center space-y-3 w-full">
+                <p className="text-sm text-emerald-400 font-medium">
+                  ✓ Path recorded ({recordedPath.length} points)
+                </p>
+                
+                {/* Speed Slider Added Here */}
+                <div className="mt-4 flex flex-col items-center space-y-2 rounded-md bg-white/5 p-4 w-full">
+                  <div className="flex w-full justify-between px-1 text-xs text-white/70">
+                    <span>Turtle</span>
+                    <span className="font-semibold text-white">{speed.toFixed(1)}x</span>
+                    <span>Cheetah</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="15.0"
+                    step="0.5"
+                    value={speed}
+                    onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                    className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-white/20 accent-emerald-500"
+                  />
+                </div>
+
+                <button
+                  onClick={handleStartPathRecord}
+                  className="mt-2 text-xs text-white/60 hover:text-white underline"
+                >
+                  Re-record path
+                </button>
+              </div>
+            ) : (
+              <div className="text-center">
+                <button
+                  onClick={handleStartPathRecord}
+                  className="flex h-16 items-center justify-center rounded-full bg-blue-500 px-8 text-white font-bold transition-transform hover:scale-105 shadow-lg"
+                >
+                  🚶 Walk 5s Path
+                </button>
+                <p className="mt-3 text-xs text-white/70">Panel will vanish while you walk.</p>
               </div>
             )}
           </div>
@@ -3229,13 +3441,22 @@ export function AnimalDrawPanel({
 
           {step === 'sound' && (
             <button
-              onClick={handleDone}
+              onClick={handleNextToPath}
               disabled={isRecording}
               className={`rounded-md px-5 py-2 text-sm font-medium text-neutral-950 ${
                 isRecording
                   ? 'bg-neutral-600 cursor-not-allowed'
-                  : 'bg-emerald-500 hover:bg-emerald-400'
+                  : 'bg-amber-500 hover:bg-amber-400'
               }`}
+            >
+              Next: Path
+            </button>
+          )}
+
+          {step === 'path' && (
+            <button
+              onClick={handleDone}
+              className="rounded-md bg-emerald-500 px-5 py-2 text-sm font-medium text-neutral-950 hover:bg-emerald-400 shadow-lg"
             >
               Done & Spawn
             </button>
