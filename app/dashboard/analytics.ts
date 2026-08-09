@@ -337,3 +337,173 @@ export function paletteMood(swatches: PaletteSwatch[]): PaletteMood | null {
   const band = MOOD_BANDS.find((b) => hue <= b.max) ?? MOOD_BANDS[MOOD_BANDS.length - 1];
   return { hue: Math.round(hue), label: band.label };
 }
+
+/** Rows created at or after `cutoffMs`. */
+export function rowsSince(rows: WorldAssetRow[], cutoffMs: number): WorldAssetRow[] {
+  return rows.filter((r) => {
+    const t = new Date(r.created_at).getTime();
+    return Number.isFinite(t) && t >= cutoffMs;
+  });
+}
+
+export interface ThemeCount {
+  key: string;
+  count: number;
+}
+
+/** Weather cell conditions from `properties.condition`. */
+export function weatherConditionCounts(rows: WorldAssetRow[]): ThemeCount[] {
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    if (r.type !== 'weather') continue;
+    const raw = r.properties?.condition;
+    const key = typeof raw === 'string' && raw.length > 0 ? raw : 'unknown';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+export interface BuildingCharacter {
+  count: number;
+  avgWidth: number;
+  avgDepth: number;
+  avgHeight: number;
+  avgFootprint: number;
+  bands: ThemeCount[];
+}
+
+/** Building size character from stored width/depth/height. */
+export function buildingCharacter(rows: WorldAssetRow[]): BuildingCharacter | null {
+  const buildings = rows.filter((r) => r.type === 'building');
+  if (buildings.length === 0) return null;
+
+  let sumW = 0;
+  let sumD = 0;
+  let sumH = 0;
+  let sumArea = 0;
+  let n = 0;
+  const bands = { cottage: 0, house: 0, manor: 0, tower: 0 };
+
+  for (const r of buildings) {
+    const p = r.properties ?? {};
+    const width = Number(p.width) || 0;
+    const depth = Number(p.depth) || 0;
+    const height = Number(p.height) || 0;
+    if (width <= 0 && depth <= 0 && height <= 0) continue;
+    n++;
+    sumW += width;
+    sumD += depth;
+    sumH += height;
+    const area = width * depth;
+    sumArea += area;
+    if (height >= 40 || area >= 2500) bands.tower += 1;
+    else if (area >= 900 || height >= 24) bands.manor += 1;
+    else if (area >= 250 || height >= 12) bands.house += 1;
+    else bands.cottage += 1;
+  }
+
+  if (n === 0) return null;
+  return {
+    count: n,
+    avgWidth: sumW / n,
+    avgDepth: sumD / n,
+    avgHeight: sumH / n,
+    avgFootprint: sumArea / n,
+    bands: Object.entries(bands)
+      .filter(([, count]) => count > 0)
+      .map(([key, count]) => ({ key, count }))
+      .sort((a, b) => b.count - a.count),
+  };
+}
+
+export interface WeatherMood {
+  label: string;
+  calmWeight: number;
+  heavyWeight: number;
+  total: number;
+}
+
+/**
+ * Mood from weather mix: clear/light → calm; overcast/fog/storm → heavy.
+ * Legacy rain/snow map into heavy/calm the same way blendWeather does.
+ */
+export function weatherMood(rows: WorldAssetRow[]): WeatherMood | null {
+  const conditions = weatherConditionCounts(rows);
+  if (conditions.length === 0) return null;
+
+  let calm = 0;
+  let heavy = 0;
+  for (const { key, count } of conditions) {
+    if (key === 'clear' || key === 'light' || key === 'snow') calm += count;
+    else if (key === 'overcast' || key === 'storm' || key === 'fog' || key === 'rain') heavy += count;
+    else calm += count * 0.5;
+  }
+  const total = calm + heavy;
+  if (total <= 0) return null;
+  const calmShare = calm / total;
+  let label: string;
+  if (calmShare >= 0.7) label = 'clear-skied';
+  else if (calmShare >= 0.45) label = 'partly cloudy';
+  else if (heavy / total >= 0.55) label = 'heavy-skied';
+  else label = 'overcast-leaning';
+  return { label, calmWeight: calm, heavyWeight: heavy, total };
+}
+
+export interface DensityCell {
+  cx: number;
+  cz: number;
+  count: number;
+}
+
+/** All occupied density cells for a heatmap overlay. */
+export function densityGrid(rows: WorldAssetRow[], cellSize = 40): DensityCell[] {
+  const cells = new Map<string, DensityCell>();
+  for (const r of rows) {
+    if (!Number.isFinite(r.x) || !Number.isFinite(r.z)) continue;
+    const cellX = Math.floor(r.x / cellSize);
+    const cellZ = Math.floor(r.z / cellSize);
+    const key = `${cellX}:${cellZ}`;
+    const existing = cells.get(key);
+    if (existing) existing.count += 1;
+    else {
+      cells.set(key, {
+        cx: cellX * cellSize + cellSize / 2,
+        cz: cellZ * cellSize + cellSize / 2,
+        count: 1,
+      });
+    }
+  }
+  return [...cells.values()].filter((c) => c.count > 0);
+}
+
+/** One-line theme insight from weather + land-use mix. */
+export function themeInsight(
+  typeCounts: Record<string, number>,
+  weather: ThemeCount[],
+  skyClouds: number,
+): string | null {
+  const weatherTotal = weather.reduce((s, w) => s + w.count, 0);
+  if (weatherTotal >= 2 && weather[0]) {
+    const top = weather[0];
+    const second = weather[1];
+    if (second && top.count > second.count) {
+      return `${top.key} weather cells lead (${top.count}), ahead of ${second.key} (${second.count}).`;
+    }
+    return `${top.key} is the most common weather theme (${top.count} cells).`;
+  }
+  const entries = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]);
+  if (entries.length >= 2) {
+    const [aType, aN] = entries[0];
+    const [bType, bN] = entries[1];
+    return `${aType} leads with ${aN} contributions; ${bType} is next at ${bN}.`;
+  }
+  if (skyClouds > 0) {
+    return `${skyClouds} drawn cloud${skyClouds === 1 ? '' : 's'} in the shared sky.`;
+  }
+  if (entries[0]) {
+    return `So far the world is mostly ${entries[0][0]} (${entries[0][1]}).`;
+  }
+  return null;
+}

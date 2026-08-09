@@ -14,18 +14,19 @@ const CACHE_TTL_MS = 3 * 60 * 1000;
 let cache: { signature: string; note: string; expires: number } | null = null;
 
 function buildPrompt(facts: unknown): string {
-  return `You analyze usage data for Infinite Terra, a shared world where users add terrain, buildings, and animals.
+  return `You analyze usage data for Infinite Terra, a shared world where users add terrain, buildings, animals, weather cells, and drawn clouds.
 
-Given this JSON summary, return ONE short insight. Compare fields — e.g. which type dominates, whether recent pace differs from average, where activity clusters, what's rare.
+Given this JSON summary, return ONE short insight. Prefer comparing themes, mood labels, recent pace vs average, densest spots, or what type dominates.
 
 DATA:
 ${JSON.stringify(facts, null, 2)}
 
 Rules:
 - 1 sentence, max 25 words
-- Use concrete numbers from the data
+- Use concrete numbers or labels from the data (counts, mood labels, weather conditions, pace)
 - Sound like a product analytics blurb, not a novel
-- No metaphors, no poetry, no mood/atmosphere language, no "world feels...", no "continues to", no quotes
+- You may mention paletteMoodLabel or weatherMood as factual tone signals when present
+- No metaphors, no poetry, no "world feels...", no "continues to", no quotes
 - No markdown or emoji
 - If sparse, say: Not enough data yet.`;
 }
