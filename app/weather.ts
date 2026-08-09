@@ -159,11 +159,3 @@ export function muteForInterior(field: WeatherField): WeatherField {
     lightDim: Math.max(field.lightDim, 0.85),
   };
 }
-
-/** Player-drawn cloud blob in the sky. */
-export interface SkyCloudAsset {
-  id: string;
-  x: number;
-  z: number;
-  sketch: string;
-}

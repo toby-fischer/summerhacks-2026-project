@@ -50,7 +50,6 @@ import {
 } from './presence';
 import {
   normalizeCondition,
-  type SkyCloudAsset,
   type WeatherAsset,
 } from './weather';
 import { WeatherSystem } from './WeatherFX';
@@ -2035,7 +2034,6 @@ function Walker({
   selfId,
   onOpenDraw,
   onOpenAnimalDraw,
-  onOpenWeather,
   onOpenVegetation,
   isModalOpen,
 }: {
@@ -2053,7 +2051,6 @@ function Walker({
   selfId: string;
   onOpenDraw: (x: number, z: number) => void;
   onOpenAnimalDraw: (x: number, z: number) => void;
-  onOpenWeather: (x: number, z: number) => void;
   onOpenVegetation: (x: number, z: number) => void;
   isModalOpen: boolean;
 }) {
@@ -2112,11 +2109,6 @@ function Walker({
           document.exitPointerLock();
           const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
           onOpenAnimalDraw(x, z);
-        } else if (e.code === 'KeyT' && !interiorRef.current) {
-          e.preventDefault();
-          document.exitPointerLock();
-          const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
-          onOpenWeather(x, z);
         } else if (e.code === 'KeyF' && !interiorRef.current) {
           e.preventDefault();
           document.exitPointerLock();
@@ -2136,7 +2128,7 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw, onOpenAnimalDraw, onOpenWeather, onOpenVegetation, isModalOpen]);
+  }, [camera, onOpenDraw, onOpenAnimalDraw, onOpenVegetation, isModalOpen]);
 
   useFrame((_, delta) => {
     if (isModalOpen) return;
@@ -2318,11 +2310,9 @@ export default function World() {
   const [buildings, setBuildings] = useState<BuildingAsset[]>([]);
   const [animals, setAnimals] = useState<AnimalData[]>([]);
   const [weathers, setWeathers] = useState<WeatherAsset[]>([]);
-  const [skyClouds, setSkyClouds] = useState<SkyCloudAsset[]>([]);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [animalDrawAt, setAnimalDrawAt] = useState<{ x: number; z: number } | null>(null);
-  const [skyDrawAt, setSkyDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [vegetationAt, setVegetationAt] = useState<{ x: number; z: number } | null>(null);
   const [vegetationPatches, setVegetationPatches] = useState<VegetationPatch[]>([]);
   const [interior, setInterior] = useState<ActiveInterior | null>(null);
@@ -2465,13 +2455,6 @@ export default function World() {
         radius: typeof props.radius === 'number' ? props.radius : 260,
       };
     };
-    const toSkyCloud = (r: Record<string, unknown>): SkyCloudAsset | null => {
-      if (r.type !== 'sky_cloud') return null;
-      const props = (r.properties ?? {}) as Record<string, unknown>;
-      if (typeof props.sketch !== 'string') return null;
-      return { id: String(r.id), x: Number(r.x) || 0, z: Number(r.z) || 0, sketch: props.sketch };
-    };
-
     supabase
       .from('world_assets')
       .select('*')
@@ -2509,14 +2492,6 @@ export default function World() {
           }
           return [...byId.values()];
         });
-        setSkyClouds((prev) => {
-          const byId = new Map(prev.map((c) => [c.id, c]));
-          for (const row of data) {
-            const c = toSkyCloud(row as Record<string, unknown>);
-            if (c) byId.set(c.id, c);
-          }
-          return [...byId.values()];
-        });
       });
 
     const channel = supabase
@@ -2541,10 +2516,6 @@ export default function World() {
           const w = toWeather(row);
           if (w) {
             setWeathers((prev) => (prev.some((q) => q.id === w.id) ? prev : [...prev, w]));
-          }
-          const sc = toSkyCloud(row);
-          if (sc) {
-            setSkyClouds((prev) => (prev.some((q) => q.id === sc.id) ? prev : [...prev, sc]));
           }
         },
       )
@@ -2728,35 +2699,6 @@ export default function World() {
     [],
   );
 
-  /* -------- contribute drawn clouds -------- */
-  const commitSkySketch = useCallback((grid: Float32Array, x: number, z: number) => {
-    const sketch = encodeSketch(grid);
-    const tempId = `temp-sky_cloud-${Math.random() * 1e9}`;
-    setSkyClouds((prev) => [...prev, { id: tempId, x, z, sketch }]);
-    setSkyDrawAt(null);
-
-    if (!supabase) return;
-
-    supabase
-      .from('world_assets')
-      .insert({
-        x,
-        z,
-        type: 'sky_cloud',
-        color: '#e8eef5',
-        properties: { sketch },
-      })
-      .select()
-      .then(({ data, error }) => {
-        setSkyClouds((prev) => {
-          const without = prev.filter((c) => c.id !== tempId);
-          if (error || !data?.length) return without;
-          const id = String((data[0] as Record<string, unknown>).id);
-          return without.some((c) => c.id === id) ? without : [...without, { id, x, z, sketch }];
-        });
-      });
-  }, []);
-
   const plantVegetation = useCallback(
     (selection: string, x: number, z: number) => {
       if (!selection.trim()) return;
@@ -2779,7 +2721,7 @@ export default function World() {
         ? 'connecting…'
         : 'offline — solo world';
 
-  const isModalOpen = drawAt !== null || skyDrawAt !== null || vegetationAt !== null || (animalDrawAt !== null && !isRecordingPath);
+  const isModalOpen = drawAt !== null || vegetationAt !== null || (animalDrawAt !== null && !isRecordingPath);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
@@ -2791,11 +2733,7 @@ export default function World() {
           scene.fog = new THREE.FogExp2('#c8daf0', 0.0012);
         }}
       >
-        <WeatherSystem
-          assets={weathers}
-          skyClouds={skyClouds}
-          indoors={interior !== null}
-        />
+        <WeatherSystem assets={weathers} indoors={interior !== null} />
 
         <Plain />
         {built.map(({ patch, terrain }) => (
@@ -2851,7 +2789,6 @@ export default function World() {
             setRecordedPath(null);
             setIsRecordingPath(false);
           }}
-          onOpenWeather={(x, z) => setSkyDrawAt({ x, z })}
           onOpenVegetation={(x, z) => setVegetationAt({ x, z })}
           isModalOpen={isModalOpen}
         />
@@ -2871,8 +2808,7 @@ export default function World() {
           {patches.length} landform{patches.length === 1 ? '' : 's'} · {buildings.length}{' '}
           building{buildings.length === 1 ? '' : 's'} · {animals.length} animal
           {animals.length === 1 ? '' : 's'} · {vegetationPatches.length} plant patch
-          {vegetationPatches.length === 1 ? '' : 'es'} · {skyClouds.length} cloud
-          {skyClouds.length === 1 ? '' : 's'} · {label}
+          {vegetationPatches.length === 1 ? '' : 'es'} · {label}
         </p>
       </div>
 
@@ -2888,7 +2824,6 @@ export default function World() {
           <p>
             <span className="text-white/85">E</span> terrain/buildings ·{' '}
             <span className="text-white/85">R</span> animal ·{' '}
-            <span className="text-white/85">T</span> draw cloud ·{' '}
             <span className="text-white/85">F</span> plant vegetation ·{' '}
             <span className="text-white/85">Esc</span> to release
           </p>
@@ -2899,13 +2834,6 @@ export default function World() {
         <DrawPanel
           onCancel={() => setDrawAt(null)}
           onCommit={(draft) => commit(draft, drawAt.x, drawAt.z)}
-        />
-      )}
-
-      {skyDrawAt && (
-        <SkyDrawPanel
-          onCancel={() => setSkyDrawAt(null)}
-          onCommit={(grid) => commitSkySketch(grid, skyDrawAt.x, skyDrawAt.z)}
         />
       )}
 
@@ -2930,160 +2858,6 @@ export default function World() {
           onPlant={(type) => plantVegetation(type, vegetationAt.x, vegetationAt.z)}
         />
       )}
-    </div>
-  );
-}
-
-/* ----------------------------------------------------------- sky draw panel --- */
-
-function SkyDrawPanel({
-  onCommit,
-  onCancel,
-}: {
-  onCommit: (grid: Float32Array) => void;
-  onCancel: () => void;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const drawing = useRef(false);
-  const [error, setError] = useState<string | null>(null);
-  const [markerSize, setMarkerSize] = useState(36);
-
-  const clear = useCallback(() => {
-    const ctx = canvasRef.current?.getContext('2d');
-    if (!ctx) return;
-    ctx.fillStyle = '#9eb6d4';
-    ctx.fillRect(0, 0, 512, 512);
-    setError(null);
-  }, []);
-
-  useEffect(() => {
-    clear();
-  }, [clear]);
-
-  const paint = useCallback(
-    (e: React.PointerEvent<HTMLCanvasElement>) => {
-      if (!drawing.current) return;
-      const c = canvasRef.current;
-      const ctx = c?.getContext('2d');
-      if (!c || !ctx) return;
-      const r = c.getBoundingClientRect();
-      const x = ((e.clientX - r.left) / r.width) * c.width;
-      const y = ((e.clientY - r.top) / r.height) * c.height;
-
-      const g = ctx.createRadialGradient(x, y, 0, x, y, markerSize);
-      g.addColorStop(0, 'rgba(255,255,255,0.85)');
-      g.addColorStop(0.55, 'rgba(240,246,252,0.45)');
-      g.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(x, y, markerSize, 0, Math.PI * 2);
-      ctx.fill();
-    },
-    [markerSize],
-  );
-
-  const submit = useCallback(() => {
-    const c = canvasRef.current;
-    const ctx = c?.getContext('2d');
-    if (!c || !ctx) return;
-    const img = ctx.getImageData(0, 0, c.width, c.height);
-    const grid = new Float32Array(SKETCH_GRID * SKETCH_GRID);
-    const step = c.width / SKETCH_GRID;
-    let inkSum = 0;
-    for (let gy = 0; gy < SKETCH_GRID; gy++) {
-      for (let gx = 0; gx < SKETCH_GRID; gx++) {
-        let acc = 0;
-        let n = 0;
-        for (let y = Math.floor(gy * step); y < Math.floor((gy + 1) * step); y++) {
-          for (let x = Math.floor(gx * step); x < Math.floor((gx + 1) * step); x++) {
-            const i = (y * c.width + x) * 4;
-            const lum =
-              (0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2]) / 255;
-            const ink = Math.max(0, (lum - 0.55) / 0.45);
-            acc += ink;
-            n++;
-          }
-        }
-        const v = n ? acc / n : 0;
-        grid[gy * SKETCH_GRID + gx] = v;
-        inkSum += v;
-      }
-    }
-    if (inkSum < 8) {
-      setError('Sketch a cloud shape first.');
-      return;
-    }
-    setError(null);
-    onCommit(grid);
-  }, [onCommit]);
-
-  return (
-    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-sm">
-      <div className="w-full max-w-md rounded-xl border border-white/10 bg-neutral-900 p-6">
-        <h2 className="text-lg font-semibold text-white">Draw a cloud</h2>
-        <p className="mt-1 text-sm text-white/60">
-          Soft white strokes become a cloud hanging over this spot — others will see it in the shared sky.
-        </p>
-
-        <canvas
-          ref={canvasRef}
-          width={512}
-          height={512}
-          className="mt-4 aspect-square w-full touch-none rounded-lg border border-white/10"
-          onPointerDown={(e) => {
-            drawing.current = true;
-            (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
-            paint(e);
-          }}
-          onPointerMove={paint}
-          onPointerUp={() => {
-            drawing.current = false;
-          }}
-          onPointerLeave={() => {
-            drawing.current = false;
-          }}
-        />
-
-        <div className="mt-3 flex items-center gap-3 text-sm text-white/70">
-          <label className="flex flex-1 items-center gap-2">
-            Brush
-            <input
-              type="range"
-              min={16}
-              max={64}
-              value={markerSize}
-              onChange={(e) => setMarkerSize(Number(e.target.value))}
-              className="flex-1"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={clear}
-            className="rounded-md px-2 py-1 text-white/70 hover:bg-white/10"
-          >
-            Clear
-          </button>
-        </div>
-
-        {error && <p className="mt-2 text-sm text-rose-300">{error}</p>}
-
-        <div className="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded-md px-3 py-1.5 text-sm text-white/70 hover:bg-white/10"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={submit}
-            className="rounded-md bg-sky-300 px-3 py-1.5 text-sm font-medium text-neutral-950 hover:bg-sky-200"
-          >
-            Place cloud
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
