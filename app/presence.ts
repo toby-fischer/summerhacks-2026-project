@@ -28,6 +28,14 @@ export interface Traveller {
   color: string;
   /** Client clock, only ever compared against itself for staleness. */
   seen: number;
+  /**
+   * Building id if this traveller is currently inside an interior — when
+   * set, x/y/z are local to that building's interior origin, not world
+   * space. Undefined means they're outdoors.
+   */
+  interiorId?: string;
+  /** Floor number within `interiorId`, meaningful only alongside it. */
+  floor?: number;
 }
 
 export type TravellerMap = Map<string, Traveller>;
@@ -67,6 +75,8 @@ export function joinTravellerChannel(
         a: typeof p.a === 'number' ? p.a : 0,
         color: typeof p.color === 'string' ? p.color : colorForId(p.id),
         seen: performance.now(),
+        interiorId: typeof p.interiorId === 'string' ? p.interiorId : undefined,
+        floor: typeof p.floor === 'number' ? p.floor : undefined,
       });
     })
     .subscribe();
