@@ -77,6 +77,7 @@ interface AnimalData {
   patternSketch: string;
   soundDataUrl?: string | null;
   path?: { x: number; z: number }[] | null;
+  speed?: number; // Add this line
 }
 
 /* ------------------------------------------------------------ encoding --- */
@@ -247,7 +248,7 @@ function AnimalMesh({
     }
 
     if (meshRef.current && animal.path && animal.path.length > 1) {
-      const speed = 4.0;
+      const speed = animal.speed ?? 4.0; // Use dynamic speed here
       let currIdx = pathIndex.current;
       const p1 = animal.path[currIdx];
       const p2 = animal.path[(currIdx + 1) % animal.path.length];
@@ -784,6 +785,7 @@ export default function World() {
         patternSketch: props.patternSketch,
         soundDataUrl: typeof props.soundDataUrl === 'string' ? props.soundDataUrl : null,
         path: Array.isArray(props.path) ? (props.path as { x: number; z: number }[]) : null,
+        speed: typeof props.speed === 'number' ? props.speed : undefined, // Add this line
       };
     };
 
@@ -904,6 +906,7 @@ export default function World() {
       patternGrid: Uint8Array,
       soundDataUrl: string | null,
       path: { x: number; z: number }[] | null,
+      speed: number, // Add speed parameter
       x: number,
       z: number,
     ) => {
@@ -911,16 +914,18 @@ export default function World() {
       const patternSketch = encodeColorSketch(patternGrid);
       const tempId = `temp-animal-${Math.random() * 1e9}`;
 
-      setAnimals((prev) => [...prev, { id: tempId, x, z, outlineSketch, patternSketch, soundDataUrl, path }]);
+      // Add speed to local state
+      setAnimals((prev) => [...prev, { id: tempId, x, z, outlineSketch, patternSketch, soundDataUrl, path, speed }]);
       setAnimalDrawAt(null);
       setIsRecordingPath(false);
       setRecordedPath(null);
 
       if (!supabase) return;
 
+      // Add speed to database properties
       supabase
         .from('world_assets')
-        .insert({ x, z, type: 'animal', properties: { outlineSketch, patternSketch, soundDataUrl, path } })
+        .insert({ x, z, type: 'animal', properties: { outlineSketch, patternSketch, soundDataUrl, path, speed } })
         .select()
         .then(({ data, error }) => {
           setAnimals((prev) => {
@@ -930,7 +935,7 @@ export default function World() {
             const id = String(row.id);
             return without.some((a) => a.id === id)
               ? without
-              : [...without, { id, x, z, outlineSketch, patternSketch, soundDataUrl, path }];
+              : [...without, { id, x, z, outlineSketch, patternSketch, soundDataUrl, path, speed }];
           });
         });
     },
@@ -1032,8 +1037,8 @@ export default function World() {
             setAnimalDrawAt(null);
             setIsRecordingPath(false);
           }}
-          onCommit={(outlineGrid, patternGrid, soundDataUrl, path) =>
-            commitAnimal(outlineGrid, patternGrid, soundDataUrl, path, animalDrawAt.x, animalDrawAt.z)
+          onCommit={(outlineGrid, patternGrid, soundDataUrl, path, speed) =>
+            commitAnimal(outlineGrid, patternGrid, soundDataUrl, path, speed, animalDrawAt.x, animalDrawAt.z)
           }
         />
       )}
@@ -1234,6 +1239,7 @@ export function AnimalDrawPanel({
     patternGrid: Uint8Array,
     soundDataUrl: string | null,
     path: { x: number; z: number }[] | null,
+    speed: number, // Add speed to prop type
   ) => void;
   onCancel: () => void;
   isRecordingPath?: boolean;
@@ -1241,6 +1247,7 @@ export function AnimalDrawPanel({
   recordedPath?: { x: number; z: number }[] | null;
 }) {
   const [step, setStep] = useState<'outline' | 'pattern' | 'sound' | 'path'>('outline');
+  const [speed, setSpeed] = useState(4.0);
   const [outlineGrid, setOutlineGrid] = useState<Uint8Array | null>(null);
   const [patternGrid, setPatternGrid] = useState<Uint8Array | null>(null);
 
@@ -1454,7 +1461,7 @@ export function AnimalDrawPanel({
 
   const handleDone = () => {
     if (!outlineGrid || !patternGrid) return;
-    onCommit(outlineGrid, patternGrid, soundDataUrl, recordedPath || null);
+    onCommit(outlineGrid, patternGrid, soundDataUrl, recordedPath || null, speed);
   };
 
   if (isRecordingPath) {
@@ -1592,13 +1599,32 @@ export function AnimalDrawPanel({
         {step === 'path' && (
           <div className="mt-6 flex flex-col items-center justify-center space-y-4 rounded-lg border border-white/10 bg-black/40 p-8">
             {recordedPath ? (
-              <div className="text-center space-y-3">
+              <div className="text-center space-y-3 w-full">
                 <p className="text-sm text-emerald-400 font-medium">
                   ✓ Path recorded ({recordedPath.length} points)
                 </p>
+                
+                {/* Speed Slider Added Here */}
+                <div className="mt-4 flex flex-col items-center space-y-2 rounded-md bg-white/5 p-4 w-full">
+                  <div className="flex w-full justify-between px-1 text-xs text-white/70">
+                    <span>Turtle</span>
+                    <span className="font-semibold text-white">{speed.toFixed(1)}x</span>
+                    <span>Cheetah</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="15.0"
+                    step="0.5"
+                    value={speed}
+                    onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                    className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-white/20 accent-emerald-500"
+                  />
+                </div>
+
                 <button
                   onClick={handleStartPathRecord}
-                  className="text-xs text-white/60 hover:text-white underline"
+                  className="mt-2 text-xs text-white/60 hover:text-white underline"
                 >
                   Re-record path
                 </button>
