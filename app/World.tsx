@@ -54,6 +54,12 @@ import {
   type WeatherAsset,
 } from './weather';
 import { WeatherSystem } from './WeatherFX';
+import {
+  createVegetationPatches,
+  VegetationLayer,
+  VegetationPanel,
+  type VegetationPatch,
+} from './vegetation';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
@@ -2030,6 +2036,7 @@ function Walker({
   onOpenDraw,
   onOpenAnimalDraw,
   onOpenWeather,
+  onOpenVegetation,
   isModalOpen,
 }: {
   built: { patch: Patch; terrain: TerrainData }[];
@@ -2047,6 +2054,7 @@ function Walker({
   onOpenDraw: (x: number, z: number) => void;
   onOpenAnimalDraw: (x: number, z: number) => void;
   onOpenWeather: (x: number, z: number) => void;
+  onOpenVegetation: (x: number, z: number) => void;
   isModalOpen: boolean;
 }) {
   const { camera } = useThree();
@@ -2109,6 +2117,11 @@ function Walker({
           document.exitPointerLock();
           const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
           onOpenWeather(x, z);
+        } else if (e.code === 'KeyF' && !interiorRef.current) {
+          e.preventDefault();
+          document.exitPointerLock();
+          const [x, z] = forwardSpawn(SKETCH_SPAWN_DISTANCE);
+          onOpenVegetation(x, z);
         }
       }
     };
@@ -2123,7 +2136,7 @@ function Walker({
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
     };
-  }, [camera, onOpenDraw, onOpenAnimalDraw, onOpenWeather, isModalOpen]);
+  }, [camera, onOpenDraw, onOpenAnimalDraw, onOpenWeather, onOpenVegetation, isModalOpen]);
 
   useFrame((_, delta) => {
     if (isModalOpen) return;
@@ -2310,6 +2323,8 @@ export default function World() {
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [animalDrawAt, setAnimalDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [skyDrawAt, setSkyDrawAt] = useState<{ x: number; z: number } | null>(null);
+  const [vegetationAt, setVegetationAt] = useState<{ x: number; z: number } | null>(null);
+  const [vegetationPatches, setVegetationPatches] = useState<VegetationPatch[]>([]);
   const [interior, setInterior] = useState<ActiveInterior | null>(null);
   const [status, setStatus] = useState<'connecting' | 'live' | 'offline'>(
     supabase ? 'connecting' : 'offline',
@@ -2742,6 +2757,21 @@ export default function World() {
       });
   }, []);
 
+  const plantVegetation = useCallback(
+    (selection: string, x: number, z: number) => {
+      if (!selection.trim()) return;
+      const next = createVegetationPatches(
+        (wx, wz) => groundAt(built, wx, wz),
+        x,
+        z,
+        selection.trim(),
+      );
+      setVegetationPatches((prev) => [...prev, ...next]);
+      setVegetationAt(null);
+    },
+    [built],
+  );
+
   const label =
     status === 'live'
       ? `${travellers.length} traveller${travellers.length === 1 ? '' : 's'} nearby`
@@ -2749,7 +2779,7 @@ export default function World() {
         ? 'connecting…'
         : 'offline — solo world';
 
-  const isModalOpen = drawAt !== null || skyDrawAt !== null || (animalDrawAt !== null && !isRecordingPath);
+  const isModalOpen = drawAt !== null || skyDrawAt !== null || vegetationAt !== null || (animalDrawAt !== null && !isRecordingPath);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
@@ -2776,6 +2806,7 @@ export default function World() {
         {animals.map((a) => (
           <AnimalMesh key={a.id} animal={a} built={built} />
         ))}
+        <VegetationLayer patches={vegetationPatches} />
         {activeInterior && (
           <InteriorScene
             building={activeInterior.building}
@@ -2821,6 +2852,7 @@ export default function World() {
             setIsRecordingPath(false);
           }}
           onOpenWeather={(x, z) => setSkyDrawAt({ x, z })}
+          onOpenVegetation={(x, z) => setVegetationAt({ x, z })}
           isModalOpen={isModalOpen}
         />
       </Canvas>
@@ -2838,7 +2870,8 @@ export default function World() {
         <p className="mt-1 text-sm text-white/70">
           {patches.length} landform{patches.length === 1 ? '' : 's'} · {buildings.length}{' '}
           building{buildings.length === 1 ? '' : 's'} · {animals.length} animal
-          {animals.length === 1 ? '' : 's'} · {skyClouds.length} cloud
+          {animals.length === 1 ? '' : 's'} · {vegetationPatches.length} plant patch
+          {vegetationPatches.length === 1 ? '' : 'es'} · {skyClouds.length} cloud
           {skyClouds.length === 1 ? '' : 's'} · {label}
         </p>
       </div>
@@ -2856,6 +2889,7 @@ export default function World() {
             <span className="text-white/85">E</span> terrain/buildings ·{' '}
             <span className="text-white/85">R</span> animal ·{' '}
             <span className="text-white/85">T</span> draw cloud ·{' '}
+            <span className="text-white/85">F</span> plant vegetation ·{' '}
             <span className="text-white/85">Esc</span> to release
           </p>
         )}
@@ -2887,6 +2921,13 @@ export default function World() {
           onCommit={(outlineGrid, patternGrid, soundDataUrl, path, speed) =>
             commitAnimal(outlineGrid, patternGrid, soundDataUrl, path, speed, animalDrawAt.x, animalDrawAt.z)
           }
+        />
+      )}
+
+      {vegetationAt && (
+        <VegetationPanel
+          onCancel={() => setVegetationAt(null)}
+          onPlant={(type) => plantVegetation(type, vegetationAt.x, vegetationAt.z)}
         />
       )}
     </div>
@@ -3501,7 +3542,7 @@ export function AnimalDrawPanel({
     return (
       <div className="pointer-events-none absolute inset-0 z-50 flex items-start justify-center pt-24">
         <div className="rounded-full bg-red-500/90 px-6 py-3 text-lg font-bold text-white shadow-lg animate-pulse">
-          🔴 Recording Path... {pathTimeLeft > 0 ? pathTimeLeft : 0}s
+          ≡ƒö┤ Recording Path... {pathTimeLeft > 0 ? pathTimeLeft : 0}s
         </div>
       </div>
     );
@@ -3581,7 +3622,7 @@ export function AnimalDrawPanel({
             {isRecording ? (
               <div className="text-center">
                 <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-500/20 text-red-500 animate-pulse">
-                  🎙️
+                  ≡ƒÄÖ∩╕Å
                 </div>
                 <p className="mt-3 text-lg font-bold text-red-400">Recording... {timeLeft}s</p>
               </div>
@@ -3604,7 +3645,7 @@ export function AnimalDrawPanel({
                       onClick={startRecording}
                       className="flex h-16 w-16 items-center justify-center rounded-full bg-amber-500 text-2xl text-neutral-950 transition-transform hover:scale-105"
                     >
-                      🎙️
+                      ≡ƒÄÖ∩╕Å
                     </button>
                     <span className="mt-2 text-xs text-white/70">Record 5s</span>
                   </div>
@@ -3613,7 +3654,7 @@ export function AnimalDrawPanel({
 
                   <div className="flex flex-col items-center">
                     <label className="flex h-16 w-16 cursor-pointer items-center justify-center rounded-full bg-blue-600 text-2xl text-white transition-transform hover:scale-105">
-                      📁
+                      ≡ƒôü
                       <input
                         type="file"
                         accept="audio/*"
@@ -3668,7 +3709,7 @@ export function AnimalDrawPanel({
                   onClick={handleStartPathRecord}
                   className="flex h-16 items-center justify-center rounded-full bg-blue-500 px-8 text-white font-bold transition-transform hover:scale-105 shadow-lg"
                 >
-                  🚶 Walk 5s Path
+                  ≡ƒÜ╢ Walk 5s Path
                 </button>
                 <p className="mt-3 text-xs text-white/70">Panel will vanish while you walk.</p>
               </div>
