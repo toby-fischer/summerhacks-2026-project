@@ -11,6 +11,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { PointerLockControls, Sky, Stars } from '@react-three/drei';
 import { createClient } from '@supabase/supabase-js';
@@ -2734,7 +2735,15 @@ export default function World() {
       </Canvas>
 
       <div className="pointer-events-none absolute left-6 top-6 rounded-lg bg-black/50 p-4 backdrop-blur">
-        <h1 className="text-lg font-semibold text-white">Infinite Terra</h1>
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="text-lg font-semibold text-white">Infinite Terra</h1>
+          <Link
+            href="/dashboard"
+            className="pointer-events-auto text-base text-white/60 underline decoration-white/25 underline-offset-2 hover:text-white/90"
+          >
+            observatory ↗
+          </Link>
+        </div>
         <p className="mt-1 text-sm text-white/70">
           {patches.length} landform{patches.length === 1 ? '' : 's'} · {buildings.length}{' '}
           building{buildings.length === 1 ? '' : 's'} · {animals.length} animal{animals.length === 1 ? '' : 's'} ·{' '}
@@ -2742,7 +2751,7 @@ export default function World() {
         </p>
       </div>
 
-      <div className="pointer-events-none absolute bottom-6 left-6 space-y-1 text-xs text-white/55">
+      <div className="pointer-events-none absolute bottom-6 left-6 space-y-1.5 text-base text-white/60">
         <p>
           <span className="text-white/85">Click</span> to look ·{' '}
           <span className="text-white/85">WASD</span> to walk ·{' '}
