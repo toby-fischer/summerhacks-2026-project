@@ -17,7 +17,15 @@ import { createClient } from '@supabase/supabase-js';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import * as THREE from 'three';
 
-import { buildingFromImageData, type BuildingData } from './building';
+import {
+  buildingFromImageData,
+  classifyBuildingType,
+  CULTURE_STYLES,
+  MAX_FLOOR_BANDS,
+  type BuildingData,
+  type BuildingType,
+  type CultureStyle,
+} from './building';
 import {
   generateFloorplan,
   generateFurniture,
@@ -104,6 +112,28 @@ interface BuildingAsset {
   meanInk: number;
   normWidth: number;
   normHeight: number;
+  roofFrac: number;
+  floorProfile: { widthFrac: number; offsetFrac: number }[];
+}
+
+const FLAT_FLOOR_PROFILE: { widthFrac: number; offsetFrac: number }[] = Array.from(
+  { length: MAX_FLOOR_BANDS },
+  () => ({ widthFrac: 1, offsetFrac: 0 }),
+);
+
+function sanitizeFloorProfile(v: unknown): { widthFrac: number; offsetFrac: number }[] {
+  if (!Array.isArray(v) || v.length === 0) return FLAT_FLOOR_PROFILE;
+  const out = v.map((entry) => {
+    const e = (entry ?? {}) as Record<string, unknown>;
+    const widthFrac = Number(e.widthFrac);
+    const offsetFrac = Number(e.offsetFrac);
+    return {
+      widthFrac: Number.isFinite(widthFrac) ? clamp(widthFrac, 0.4, 1.2) : 1,
+      offsetFrac: Number.isFinite(offsetFrac) ? clamp(offsetFrac, -0.4, 0.4) : 0,
+    };
+  });
+  while (out.length < MAX_FLOOR_BANDS) out.push({ widthFrac: 1, offsetFrac: 0 });
+  return out;
 }
 
 type DrawCommit =
@@ -233,7 +263,7 @@ function sampleFootprintGround(
   cz: number,
   width: number,
   depth: number,
-): { center: number; nw: number; ne: number; sw: number; se: number } {
+): { center: number; nw: number; ne: number; sw: number; se: number; frontMid: number } {
   const halfW = width / 2;
   const halfD = depth / 2;
   return {
@@ -242,13 +272,18 @@ function sampleFootprintGround(
     ne: groundAt(built, cx + halfW, cz + halfD),
     sw: groundAt(built, cx - halfW, cz - halfD),
     se: groundAt(built, cx + halfW, cz - halfD),
+    // The door sits at (cx, cz + halfD) — sampled directly so the threshold
+    // always lines up with the ground right in front of it, not just the
+    // footprint's corners.
+    frontMid: groundAt(built, cx, cz + halfD),
   };
 }
 
-type PartKind = 'foundation' | 'wall' | 'trim' | 'roof' | 'window' | 'door' | 'accent' | 'awning';
+type PartKind = 'foundation' | 'wall' | 'trim' | 'roof' | 'window' | 'door' | 'accent' | 'awning' | 'porch' | 'balcony';
 interface PartTransform {
   kind: PartKind;
   style: 0 | 1 | 2;
+  culture: CultureStyle;
   position: [number, number, number];
   scale: [number, number, number];
   rotation: [number, number, number];
@@ -276,6 +311,15 @@ function footprintFor(building: BuildingAsset): { cx: number; cz: number; width:
  * interior/door logic need to agree on. Computed once per building so the
  * door you can see is exactly the door you can walk through.
  */
+/** Enterable garage bay carved into a side wall — house type only. */
+interface GarageBay {
+  side: 'west' | 'east';
+  /** Offset from the building center along z, in world units. */
+  centerZ: number;
+  halfW: number;
+  doorH: number;
+}
+
 interface BuildingLayout {
   cx: number;
   cz: number;
@@ -285,10 +329,29 @@ interface BuildingLayout {
   floorH: number;
   bodyH: number;
   style: 0 | 1 | 2;
+  cultureStyle: CultureStyle;
+  buildingType: BuildingType;
+  garage: GarageBay | null;
   doorW: number;
   doorH: number;
   floorY: number;
-  profile: { center: number; nw: number; ne: number; sw: number; se: number };
+  profile: { center: number; nw: number; ne: number; sw: number; se: number; frontMid: number };
+  /**
+   * Per-floor width and horizontal center offset (world units), index 0 =
+   * ground floor. Ground floor always equals `width`/offset 0 — collision,
+   * the door, the garage, and terrain flattening all key off that and must
+   * stay put. Floors above it taper/shift to follow the sketch's silhouette
+   * (see floorProfile on BuildingAsset), so a tapering or lopsided drawing
+   * actually shows up as a stepped/offset building instead of a plain box.
+   */
+  floorWidths: number[];
+  floorOffsetX: number[];
+}
+
+/** Deterministic per-building cultural/architectural flavor (roof grammar + palette). */
+function hashCultureStyle(id: string): CultureStyle {
+  const idx = Math.floor(hash01(id, 401) * CULTURE_STYLES.length) % CULTURE_STYLES.length;
+  return CULTURE_STYLES[idx];
 }
 
 function buildingLayout(
@@ -302,11 +365,75 @@ function buildingLayout(
   const floors = clamp(Math.round(rawH / floorH), 1, 5);
   const bodyH = floors * floorH;
   const style = Math.floor(hash01(building.id, 7) * 3) as 0 | 1 | 2;
+  const cultureStyle = hashCultureStyle(building.id);
+  const buildingType = classifyBuildingType(floors, width, depth, building.coverage, building.roofFrac);
   const profile = sampleFootprintGround(built, cx, cz, width, depth);
-  const floorY = Math.max(profile.nw, profile.ne, profile.sw, profile.se);
+  // Floor height is pinned to the *front* edge (the door side, nw/ne/frontMid)
+  // rather than the highest corner overall. Basing it on the highest corner
+  // anywhere on the footprint (including the back) meant a building whose
+  // back happened to touch higher ground — a hillside behind it — got
+  // lifted along with that corner, stranding the entrance above the actual
+  // ground in front of it, unreachable on foot. The back can instead sit
+  // partly embedded into a rising slope; the walk-up to the door matters
+  // more than the back wall's exact grade.
+  const floorY = Math.max(profile.nw, profile.ne, profile.frontMid);
   const doorW = Math.min(style === 2 ? 2.1 : 1.7, width * (style === 1 ? 0.18 : 0.24));
   const doorH = Math.min(style === 1 ? 2.6 : 2.3, floorH * (style === 1 ? 0.94 : 0.86));
-  return { cx, cz, width, depth, floors, floorH, bodyH, style, doorW, doorH, floorY, profile };
+
+  let garage: GarageBay | null = null;
+  const baysXCount = Math.round(width / 1.8);
+  if (buildingType === 'house' && baysXCount >= 4 && hash01(building.id, 301) > 0.4) {
+    const side: 'west' | 'east' = hash01(building.id, 302) > 0.5 ? 'east' : 'west';
+    const halfWGarage = Math.min(1.6, width * 0.16);
+    const halfD = depth / 2;
+    const centerZ = clamp(
+      halfD - halfWGarage - 0.6,
+      -halfD + halfWGarage + 0.3,
+      halfD - halfWGarage - 0.3,
+    );
+    garage = { side, centerZ, halfW: halfWGarage, doorH: Math.min(2.1, floorH * 0.82) };
+  }
+
+  // Map the sketch's bottom-to-top band profile onto this building's actual
+  // floor count. Ground floor is pinned to the bay-quantized footprint
+  // (garage/door/collision/terrain all depend on it); floors above sample
+  // the profile and taper/shift relative to it, clamped so they never drift
+  // far enough to look structurally implausible or poke outside the plinth.
+  const profileBands = building.floorProfile.length ? building.floorProfile : FLAT_FLOOR_PROFILE;
+  const floorWidths: number[] = [width];
+  const floorOffsetX: number[] = [0];
+  for (let f = 1; f < floors; f++) {
+    const bandIdx =
+      floors > 1
+        ? Math.min(profileBands.length - 1, Math.round((f / (floors - 1)) * (profileBands.length - 1)))
+        : 0;
+    const band = profileBands[bandIdx];
+    const w = clamp(width * band.widthFrac, width * 0.5, width * 1.08);
+    const maxOffset = Math.max(0, (width - w) / 2);
+    const offset = clamp(band.offsetFrac * width * 0.5, -maxOffset, maxOffset);
+    floorWidths.push(w);
+    floorOffsetX.push(offset);
+  }
+
+  return {
+    cx,
+    cz,
+    width,
+    depth,
+    floors,
+    floorH,
+    bodyH,
+    style,
+    cultureStyle,
+    buildingType,
+    garage,
+    doorW,
+    doorH,
+    floorY,
+    profile,
+    floorWidths,
+    floorOffsetX,
+  };
 }
 
 /** Matches the wall thickness buildPartsForBuilding actually renders. */
@@ -321,11 +448,29 @@ const EXTERIOR_WALL_T = 0.24;
 function exteriorWallFootprints(layout: BuildingLayout): Footprint[] {
   const halfW = layout.width / 2;
   const halfD = layout.depth / 2;
-  const out: Footprint[] = [
-    { cx: layout.cx - halfW + EXTERIOR_WALL_T / 2, cz: layout.cz, width: EXTERIOR_WALL_T, depth: layout.depth },
-    { cx: layout.cx + halfW - EXTERIOR_WALL_T / 2, cz: layout.cz, width: EXTERIOR_WALL_T, depth: layout.depth },
-    { cx: layout.cx, cz: layout.cz - halfD + EXTERIOR_WALL_T / 2, width: layout.width, depth: EXTERIOR_WALL_T },
-  ];
+  const out: Footprint[] = [];
+
+  // Side (east/west) walls — plain full-depth slabs, unless this is a house
+  // with a garage bay carved into this particular side, in which case the
+  // wall splits around the garage-door gap exactly like the front door does.
+  const pushSideWall = (side: 'west' | 'east') => {
+    const x = side === 'west' ? layout.cx - halfW + EXTERIOR_WALL_T / 2 : layout.cx + halfW - EXTERIOR_WALL_T / 2;
+    const minZ = layout.cz - halfD;
+    const maxZ = layout.cz + halfD;
+    if (layout.garage && layout.garage.side === side) {
+      const gapCenter = layout.cz + layout.garage.centerZ;
+      const gapHalf = layout.garage.halfW;
+      const a = gapCenter - gapHalf;
+      const b = gapCenter + gapHalf;
+      if (a - minZ > 0.15) out.push({ cx: x, cz: (minZ + a) / 2, width: EXTERIOR_WALL_T, depth: a - minZ });
+      if (maxZ - b > 0.15) out.push({ cx: x, cz: (b + maxZ) / 2, width: EXTERIOR_WALL_T, depth: maxZ - b });
+    } else {
+      out.push({ cx: x, cz: layout.cz, width: EXTERIOR_WALL_T, depth: layout.depth });
+    }
+  };
+  pushSideWall('west');
+  pushSideWall('east');
+  out.push({ cx: layout.cx, cz: layout.cz - halfD + EXTERIOR_WALL_T / 2, width: layout.width, depth: EXTERIOR_WALL_T });
 
   // Front (south) wall has the doorway gap.
   const doorHalf = layout.doorW / 2 + 0.25;
@@ -356,7 +501,24 @@ function insideBuildingShell(layout: BuildingLayout, x: number, z: number): bool
 }
 
 function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout): PartTransform[] {
-  const { cx, cz, width, depth, floors, floorH, bodyH, style, doorW, doorH, floorY, profile } = layout;
+  const {
+    cx,
+    cz,
+    width,
+    depth,
+    floors,
+    floorH,
+    bodyH,
+    style,
+    buildingType,
+    garage,
+    doorW,
+    doorH,
+    floorY,
+    profile,
+    floorWidths,
+    floorOffsetX,
+  } = layout;
 
   // Human-designed module dimensions. Buildings are assembled from these only.
   const bayW = 1.8;
@@ -367,8 +529,20 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
   const baysX = Math.round(width / bayW);
   const baysZ = Math.round(depth / bayW);
 
-  const sideSlope = floorY - Math.min(profile.nw, profile.ne, profile.sw, profile.se);
-  const centerY = floorY + bodyH / 2;
+  // Walls extend downward past floorY as a skirt to cover minor unevenness
+  // under them, but capped — the corner posts below already bridge any real
+  // slope down to each corner's actual ground height with thin per-corner
+  // pillars. Without the cap, a building spawned where one corner lands on
+  // a steep slope (a mountainside, say) would stretch its entire wall face
+  // — a single flat box, not just a corner — down to match, ballooning into
+  // a giant wedge instead of a normal building on stilts.
+  const sideSlope = Math.min(floorY - Math.min(profile.nw, profile.ne, profile.sw, profile.se), floorH * 1.2);
+  // The skirt must stay pinned to the same top (floorY + bodyH) as the roof
+  // — otherwise the symmetric box centered at floorY + bodyH/2 pushes the
+  // top past the roof base too, and the wall visibly pokes through a thin
+  // pitched roof slab (it was only hidden before inside the old solid
+  // stepped-roof box).
+  const centerY = floorY + bodyH / 2 - sideSlope / 2;
   const seed = hash01(building.id, 41);
   const styleCfg =
     style === 0
@@ -383,14 +557,13 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
     scale: [number, number, number],
     rotation: [number, number, number] = [0, 0, 0],
   ) => {
-    parts.push({ kind, style, position, scale, rotation });
+    parts.push({ kind, style, culture: layout.cultureStyle, position, scale, rotation });
   };
 
   const parts: PartTransform[] = [];
   const halfW = width / 2;
   const halfD = depth / 2;
 
-  const sideHeight = bodyH + sideSlope;
   // Foundation plinth + slope posts so building sits cleanly on uneven terrain.
   put('foundation', [cx, floorY - 0.16, cz], [width + 0.36, 0.32, depth + 0.36]);
   const supports: Array<[number, number, number]> = [
@@ -404,17 +577,56 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
     put('foundation', [x, gy + h / 2 - 0.02, z], [0.36, h, 0.36]);
   }
 
-  // Side wall slabs.
-  put('wall', [cx - halfW + wallT / 2, centerY, cz], [wallT, sideHeight, depth]);
-  put('wall', [cx + halfW - wallT / 2, centerY, cz], [wallT, sideHeight, depth]);
-  put('wall', [cx, centerY, cz - halfD + wallT / 2], [width, sideHeight, wallT]);
-  put('wall', [cx, centerY, cz + halfD - wallT / 2], [width, sideHeight, wallT]);
+  // Per-floor extents: ground floor is pinned to the exact footprint used by
+  // collision/door/garage/terrain (offset 0, full width). Floors above taper
+  // and/or shift in x to follow the sketch's floorProfile, so a drawing that
+  // narrows or leans toward the top actually shows up as a stepped/offset
+  // silhouette instead of a uniform box stacked straight up.
+  const floorHalfW = (f: number) => floorWidths[f] / 2;
+  const floorCx = (f: number) => cx + floorOffsetX[f];
+  const floorBottomY = (f: number) => (f === 0 ? floorY - sideSlope : floorY + f * floorH);
+  const floorTopY = (f: number) => floorY + (f + 1) * floorH;
 
-  // Floor trims.
+  // Wall slabs per floor — split around the garage-door gap on whichever
+  // side/floor has one (ground floor only), exactly like the front door.
+  for (let f = 0; f < floors; f++) {
+    const hw = floorHalfW(f);
+    const fcx = floorCx(f);
+    const bottom = floorBottomY(f);
+    const top = floorTopY(f);
+    const h = top - bottom;
+    const cy = bottom + h / 2;
+
+    const sideWallSlab = (side: 'west' | 'east') => {
+      const x = side === 'west' ? fcx - hw + wallT / 2 : fcx + hw - wallT / 2;
+      if (garage && garage.side === side && f === 0) {
+        const gapCenter = cz + garage.centerZ;
+        const gapHalf = garage.halfW;
+        const a = gapCenter - gapHalf;
+        const b = gapCenter + gapHalf;
+        const minZ = cz - halfD;
+        const maxZ = cz + halfD;
+        if (a - minZ > 0.15) put('wall', [x, cy, (minZ + a) / 2], [wallT, h, a - minZ]);
+        if (maxZ - b > 0.15) put('wall', [x, cy, (b + maxZ) / 2], [wallT, h, maxZ - b]);
+        const garageDoorH = garage.doorH;
+        put('door', [x + (side === 'west' ? -0.01 : 0.01), floorY + garageDoorH / 2, gapCenter], [0.06, garageDoorH, gapHalf * 2], [0, Math.PI / 2, 0]);
+      } else {
+        put('wall', [x, cy, cz], [wallT, h, depth]);
+      }
+    };
+    sideWallSlab('west');
+    sideWallSlab('east');
+    put('wall', [fcx, cy, cz - halfD + wallT / 2], [hw * 2, h, wallT]);
+    put('wall', [fcx, cy, cz + halfD - wallT / 2], [hw * 2, h, wallT]);
+  }
+
+  // Floor trims — sit at each floor line, sized to whichever floor is above.
   for (let f = 1; f <= floors; f++) {
     if (f % styleCfg.trimEvery !== 0) continue;
     const y = floorY + f * floorH;
-    put('trim', [cx, y, cz], [width + trimT, trimH, depth + trimT]);
+    const hw = f < floors ? floorHalfW(f) : floorHalfW(floors - 1);
+    const fcx = f < floors ? floorCx(f) : floorCx(floors - 1);
+    put('trim', [fcx, y, cz], [hw * 2 + trimT, trimH, depth + trimT]);
   }
 
   if (styleCfg.cornerAccent) {
@@ -434,9 +646,12 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
   const windowH = style === 2 ? 0.78 : style === 1 ? 1.02 : 0.9;
   for (let f = 0; f < floors; f++) {
     const wy = floorY + f * floorH + floorH * 0.56;
-    for (let i = 0; i < baysX; i++) {
-      const x = cx - halfW + bayW * (i + 0.5);
-      const frontOpen = i === Math.floor(baysX / 2) && f === 0;
+    const hw = floorHalfW(f);
+    const fcx = floorCx(f);
+    const baysXf = Math.max(1, Math.round((hw * 2) / bayW));
+    for (let i = 0; i < baysXf; i++) {
+      const x = fcx - hw + bayW * (i + 0.5);
+      const frontOpen = i === Math.floor(baysXf / 2) && f === 0;
       if (!frontOpen && hash01(`${building.id}-f-${f}-x-${i}`, 5) > styleCfg.windowBias + seed * 0.2) {
         put('window', [x, wy, cz + halfD + 0.012], [windowW, windowH, 0.04]);
         if (f < floors - 1 && hash01(`${building.id}-awn-f-${f}-x-${i}`, 103) < styleCfg.awningProb) {
@@ -449,33 +664,147 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
     }
     for (let i = 0; i < baysZ; i++) {
       const z = cz - halfD + bayW * (i + 0.5);
-      if (hash01(`${building.id}-l-${f}-z-${i}`, 29) > styleCfg.windowBias + 0.16) {
-        put('window', [cx - halfW - 0.012, wy, z], [0.04, windowH, windowW]);
+      const onGarageWest = garage && garage.side === 'west' && f === 0 && Math.abs(z - (cz + garage.centerZ)) < garage.halfW + bayW * 0.4;
+      const onGarageEast = garage && garage.side === 'east' && f === 0 && Math.abs(z - (cz + garage.centerZ)) < garage.halfW + bayW * 0.4;
+      if (!onGarageWest && hash01(`${building.id}-l-${f}-z-${i}`, 29) > styleCfg.windowBias + 0.16) {
+        put('window', [fcx - hw - 0.012, wy, z], [0.04, windowH, windowW]);
       }
-      if (hash01(`${building.id}-r-${f}-z-${i}`, 43) > styleCfg.windowBias + 0.16) {
-        put('window', [cx + halfW + 0.012, wy, z], [0.04, windowH, windowW]);
+      if (!onGarageEast && hash01(`${building.id}-r-${f}-z-${i}`, 43) > styleCfg.windowBias + 0.16) {
+        put('window', [fcx + hw + 0.012, wy, z], [0.04, windowH, windowW]);
+      }
+      // Apartment balconies: a slab + rail posts jutting off alternating
+      // upper-floor bays on the front face, so towers don't read as sealed boxes.
+      if (
+        buildingType === 'apartment' &&
+        f > 0 &&
+        i % 2 === 0 &&
+        hash01(`${building.id}-bal-${f}-${i}`, 71) > 0.45
+      ) {
+        const bz = cz - halfD + bayW * (i + 0.5);
+        const by = floorY + f * floorH - 0.08;
+        put('balcony', [fcx + hw + 0.35, by, bz], [0.7, 0.1, bayW * 0.82]);
+        put('accent', [fcx + hw + 0.66, by + 0.42, bz - bayW * 0.36], [0.06, 0.85, 0.06]);
+        put('accent', [fcx + hw + 0.66, by + 0.42, bz + bayW * 0.36], [0.06, 0.85, 0.06]);
       }
     }
   }
 
-  // Stepped roof from fixed modules.
-  const roofSteps = styleCfg.roofSteps;
-  let roofW = width * 0.96;
-  let roofD = depth * 0.96;
-  for (let i = 0; i < roofSteps; i++) {
-    const rh = style === 1 ? 0.28 : style === 2 ? 0.4 : 0.34;
-    const ry = floorY + bodyH + rh / 2 + i * (rh * 0.98);
-    put('roof', [cx, ry, cz], [roofW, rh, roofD]);
-    roofW *= styleCfg.roofShrink;
-    roofD *= styleCfg.roofShrink;
-  }
-  // Roof cap accent for stronger silhouettes.
-  if (style !== 2) {
-    put(
-      'accent',
-      [cx, floorY + bodyH + roofSteps * 0.34 + 0.18, cz],
-      [Math.max(0.35, roofW * 0.56), 0.28 + style * 0.08, Math.max(0.35, roofD * 0.56)],
-    );
+  // Roof + entry massing genuinely differs per architectural type instead of
+  // just re-skinning the same stepped box.
+  const ramp = (
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    z: number,
+    d: number,
+    thickness: number,
+  ) => {
+    const length = Math.hypot(x1 - x0, y1 - y0);
+    const angle = Math.atan2(y1 - y0, x1 - x0);
+    put('roof', [(x0 + x1) / 2, (y0 + y1) / 2, z], [length, thickness, d], [0, 0, angle]);
+  };
+
+  const topY = floorY + bodyH;
+  const topHalfW = floorHalfW(floors - 1);
+  const topCx = floorCx(floors - 1);
+  const culture = layout.cultureStyle;
+  const flatRoofCulture = culture === 'adobe' || culture === 'modern';
+
+  if ((buildingType === 'house' || buildingType === 'bungalow' || buildingType === 'mansion') && !flatRoofCulture) {
+    // Pitched gable roof: two ramps sloping up from the side eaves to a
+    // shared ridge line running along z, plus a ridge cap to hide the seam.
+    // Culture-specific tweaks (pitch, overhang, extra tiers) layer on top of
+    // the same ramp primitive rather than needing new geometry per style.
+    const isJapanese = culture === 'japanese';
+    const isTudor = culture === 'tudor';
+    const isMediterranean = culture === 'mediterranean';
+    const overhang = isJapanese ? 0.62 : isMediterranean ? 0.2 : 0.32;
+    const pitchScale = culture === 'nordic' || isTudor ? 0.82 : isMediterranean ? 0.42 : buildingType === 'mansion' ? 0.5 : 0.62;
+    const ridgeRise = topHalfW * pitchScale;
+    const roofThickness = 0.24;
+    const roofTiers = isJapanese ? 3 : 1;
+    for (let t = 0; t < roofTiers; t++) {
+      const tf = (t + 1) / roofTiers;
+      const tierTop = topY + ridgeRise * tf - (roofTiers > 1 ? t * 0.05 : 0);
+      const tierBase = t === 0 ? topY : topY + ridgeRise * ((t - 0.15) / roofTiers);
+      const tierHalfW = topHalfW * (1 - t * 0.22);
+      const tierOverhang = overhang * (1 - t * 0.3);
+      ramp(topCx + tierHalfW + tierOverhang, tierBase, topCx, tierTop, cz, depth + tierOverhang * 2, roofThickness);
+      ramp(topCx - tierHalfW - tierOverhang, tierBase, topCx, tierTop, cz, depth + tierOverhang * 2, roofThickness);
+    }
+    put('trim', [topCx, topY + ridgeRise, cz], [0.3, 0.18, depth + overhang * 2]);
+    if (isTudor) {
+      // Half-timber accent bands crossing the upper-floor walls.
+      for (let f = 1; f < floors; f++) {
+        const hw = floorHalfW(f);
+        const fcx = floorCx(f);
+        const y = floorY + f * floorH + floorH * 0.5;
+        put('accent', [fcx, y, cz + halfD + 0.02], [hw * 2 * 0.86, 0.12, 0.03]);
+        put('accent', [fcx - hw * 0.4, y, cz + halfD + 0.02], [0.12, floorH * 0.7, 0.03], [0, 0, Math.PI / 5]);
+        put('accent', [fcx + hw * 0.4, y, cz + halfD + 0.02], [0.12, floorH * 0.7, 0.03], [0, 0, -Math.PI / 5]);
+      }
+    }
+
+    // Entry porch: a small roofed overhang on columns in front of the door.
+    const porchDepth = buildingType === 'mansion' ? 2.4 : 1.5;
+    const porchW = buildingType === 'mansion' ? width * 0.62 : Math.min(width * 0.5, doorW + 1.6);
+    const porchH = doorH + 0.5;
+    const porchZ = cz + halfD + porchDepth / 2;
+    put('porch', [cx, floorY + porchH + 0.06, porchZ], [porchW, 0.16, porchDepth]);
+    const columnCount = culture === 'colonial' ? Math.max(4, buildingType === 'mansion' ? 6 : 4) : buildingType === 'mansion' ? 4 : 2;
+    for (let i = 0; i < columnCount; i++) {
+      const t = columnCount === 2 ? (i === 0 ? 0.08 : 0.92) : 0.06 + (i / (columnCount - 1)) * 0.88;
+      const px = cx - porchW / 2 + porchW * t;
+      const pz = cz + halfD + porchDepth - 0.15;
+      put('accent', [px, floorY + porchH / 2, pz], [0.2, porchH, 0.2]);
+    }
+
+    if (buildingType === 'mansion') {
+      // A small stepped cupola on the ridge for a grander silhouette, plus
+      // an extra trim band the smaller house/bungalow types skip.
+      let capW = width * 0.3;
+      let capD = depth * 0.3;
+      for (let i = 0; i < 2; i++) {
+        const rh = 0.36;
+        put('roof', [topCx, topY + ridgeRise + rh / 2 + i * rh * 0.98, cz], [capW, rh, capD]);
+        capW *= 0.8;
+        capD *= 0.8;
+      }
+      put('trim', [cx, floorY + bodyH * 0.5, cz], [width + trimT, trimH, depth + trimT]);
+    }
+  } else if (flatRoofCulture && buildingType !== 'apartment' && buildingType !== 'tower') {
+    // Adobe/modern force a flat roof with a parapet lip even on a
+    // structurally pitched-roof type — the culture's material grammar wins.
+    const parapetH = culture === 'adobe' ? 0.42 : 0.26;
+    put('roof', [topCx, topY + 0.06, cz], [topHalfW * 2 + 0.16, 0.12, depth + 0.16]);
+    put('trim', [topCx, topY + parapetH / 2, cz - halfD], [topHalfW * 2 + 0.2, parapetH, wallT]);
+    put('trim', [topCx, topY + parapetH / 2, cz + halfD], [topHalfW * 2 + 0.2, parapetH, wallT]);
+    put('trim', [topCx - topHalfW, topY + parapetH / 2, cz], [wallT, parapetH, depth + 0.2]);
+    put('trim', [topCx + topHalfW, topY + parapetH / 2, cz], [wallT, parapetH, depth + 0.2]);
+    if (culture === 'modern') {
+      put('accent', [cx, topY + 0.02, cz + halfD + 0.02], [width * 0.9, 0.04, 0.02]);
+    }
+  } else {
+    // Flat / stepped roof — apartment/tower massing, or the palette-only
+    // fallback for flat-roof cultures on an apartment/tower structure.
+    const roofSteps = styleCfg.roofSteps;
+    let roofW = topHalfW * 2 * 0.96;
+    let roofD = depth * 0.96;
+    for (let i = 0; i < roofSteps; i++) {
+      const rh = style === 1 ? 0.28 : style === 2 ? 0.4 : 0.34;
+      const ry = topY + rh / 2 + i * (rh * 0.98);
+      put('roof', [topCx, ry, cz], [roofW, rh, roofD]);
+      roofW *= styleCfg.roofShrink;
+      roofD *= styleCfg.roofShrink;
+    }
+    if (style !== 2) {
+      put(
+        'accent',
+        [topCx, topY + roofSteps * 0.34 + 0.18, cz],
+        [Math.max(0.35, roofW * 0.56), 0.28 + style * 0.08, Math.max(0.35, roofD * 0.56)],
+      );
+    }
   }
 
   return parts;
@@ -484,7 +813,7 @@ function buildPartsForBuilding(building: BuildingAsset, layout: BuildingLayout):
 function InstancedKitMesh({
   parts,
   kind,
-  style,
+  culture,
   color,
   emissive,
   roughness,
@@ -494,7 +823,7 @@ function InstancedKitMesh({
 }: {
   parts: PartTransform[];
   kind: PartKind;
-  style: 0 | 1 | 2;
+  culture: CultureStyle;
   color: string;
   emissive?: string;
   roughness?: number;
@@ -503,8 +832,8 @@ function InstancedKitMesh({
   opacity?: number;
 }) {
   const filtered = useMemo(
-    () => parts.filter((p) => p.kind === kind && p.style === style),
-    [parts, kind, style],
+    () => parts.filter((p) => p.kind === kind && p.culture === culture),
+    [parts, kind, culture],
   );
   const ref = useRef<THREE.InstancedMesh>(null);
   const dummy = useMemo(() => new THREE.Object3D(), []);
@@ -545,6 +874,147 @@ function InstancedKitMesh({
   );
 }
 
+interface CulturePalette {
+  culture: CultureStyle;
+  foundation: string;
+  wall: string;
+  wallEm: string;
+  trim: string;
+  roof: string;
+  roofEm: string;
+  window: string;
+  windowEm: string;
+  door: string;
+  doorEm: string;
+  accent: string;
+  awning: string;
+  porch: string;
+  balcony: string;
+}
+
+/** Exterior material grammar per cultural style — the palette axis of CultureStyle. */
+const CULTURE_PALETTES: CulturePalette[] = [
+  {
+    culture: 'mediterranean',
+    foundation: '#c7b79a',
+    wall: '#e8ddc4',
+    wallEm: '#4a3f2a',
+    trim: '#d9c9a3',
+    roof: '#b5562f',
+    roofEm: '#5c2311',
+    window: '#9fc2c9',
+    windowEm: '#6fd0e0',
+    door: '#5b7a5e',
+    doorEm: '#1f2f1f',
+    accent: '#c9b48a',
+    awning: '#cf7a48',
+    porch: '#d9c9a3',
+    balcony: '#c7b79a',
+  },
+  {
+    culture: 'nordic',
+    foundation: '#4c4640',
+    wall: '#d7cdb8',
+    wallEm: '#2c2820',
+    trim: '#8b7a63',
+    roof: '#2e3436',
+    roofEm: '#131718',
+    window: '#a9c7d6',
+    windowEm: '#8fd0ff',
+    door: '#7c3f34',
+    doorEm: '#2c1310',
+    accent: '#5c5347',
+    awning: '#8b7a63',
+    porch: '#8b7a63',
+    balcony: '#d7cdb8',
+  },
+  {
+    culture: 'japanese',
+    foundation: '#3c3733',
+    wall: '#e4ddce',
+    wallEm: '#2a251e',
+    trim: '#2f2822',
+    roof: '#33302e',
+    roofEm: '#171514',
+    window: '#e9e4d2',
+    windowEm: '#f2d78c',
+    door: '#8a2f24',
+    doorEm: '#380f0a',
+    accent: '#2f2822',
+    awning: '#5a4c3c',
+    porch: '#4a3f33',
+    balcony: '#3c3733',
+  },
+  {
+    culture: 'colonial',
+    foundation: '#8b8578',
+    wall: '#f1eee4',
+    wallEm: '#3a382f',
+    trim: '#e7e2d2',
+    roof: '#3f4a52',
+    roofEm: '#1a2124',
+    window: '#a7c4cf',
+    windowEm: '#7fd4f0',
+    door: '#7a2f2c',
+    doorEm: '#2f1110',
+    accent: '#e7e2d2',
+    awning: '#7a2f2c',
+    porch: '#e7e2d2',
+    balcony: '#f1eee4',
+  },
+  {
+    culture: 'tudor',
+    foundation: '#5a4a3a',
+    wall: '#e6ddc8',
+    wallEm: '#3a3122',
+    trim: '#2b2118',
+    roof: '#3a2620',
+    roofEm: '#180f0c',
+    window: '#c9d4b0',
+    windowEm: '#e8c96e',
+    door: '#2b2118',
+    doorEm: '#100b07',
+    accent: '#2b2118',
+    awning: '#4a3d2e',
+    porch: '#5a4a3a',
+    balcony: '#e6ddc8',
+  },
+  {
+    culture: 'adobe',
+    foundation: '#a97b52',
+    wall: '#d9a56f',
+    wallEm: '#4a2f18',
+    trim: '#c98f5b',
+    roof: '#c98f5b',
+    roofEm: '#5c3b1e',
+    window: '#7d97a0',
+    windowEm: '#8fd0ff',
+    door: '#4f7a6e',
+    doorEm: '#193029',
+    accent: '#a97b52',
+    awning: '#c98f5b',
+    porch: '#a97b52',
+    balcony: '#c98f5b',
+  },
+  {
+    culture: 'modern',
+    foundation: '#3d3f42',
+    wall: '#c9cbce',
+    wallEm: '#232527',
+    trim: '#4d4f52',
+    roof: '#26282a',
+    roofEm: '#0f1011',
+    window: '#8fb8cc',
+    windowEm: '#bfe8ff',
+    door: '#26282a',
+    doorEm: '#0f1011',
+    accent: '#4d4f52',
+    awning: '#4d4f52',
+    porch: '#c9cbce',
+    balcony: '#3d3f42',
+  },
+];
+
 function BuildingKit({
   layouts,
 }: {
@@ -558,62 +1028,18 @@ function BuildingKit({
 
   return (
     <>
-      {([
-        {
-          style: 0 as const,
-          foundation: '#4f5648',
-          wall: '#5f685a',
-          wallEm: '#233126',
-          trim: '#7d8c72',
-          roof: '#738066',
-          roofEm: '#2b3a2f',
-          window: '#94b8a9',
-          windowEm: '#6dcaa9',
-          door: '#8e7e5f',
-          doorEm: '#3f2f17',
-          accent: '#8e9f80',
-          awning: '#aebf8d',
-        },
-        {
-          style: 1 as const,
-          foundation: '#4b4f5a',
-          wall: '#5e6172',
-          wallEm: '#222a3e',
-          trim: '#888ba3',
-          roof: '#6d7087',
-          roofEm: '#303552',
-          window: '#9fb2d4',
-          windowEm: '#78a2f0',
-          door: '#776f83',
-          doorEm: '#312843',
-          accent: '#8f92aa',
-          awning: '#9aa0be',
-        },
-        {
-          style: 2 as const,
-          foundation: '#5c5042',
-          wall: '#76634e',
-          wallEm: '#3a2919',
-          trim: '#9c8261',
-          roof: '#8b6f53',
-          roofEm: '#51341f',
-          window: '#c5b595',
-          windowEm: '#dca96d',
-          door: '#5f4a34',
-          doorEm: '#352211',
-          accent: '#a28c6f',
-          awning: '#c8aa7a',
-        },
-      ] as const).map((p) => (
-        <React.Fragment key={`style-${p.style}`}>
-          <InstancedKitMesh parts={parts} kind="foundation" style={p.style} color={p.foundation} roughness={0.96} metalness={0} />
-          <InstancedKitMesh parts={parts} kind="wall" style={p.style} color={p.wall} emissive={p.wallEm} roughness={0.9} metalness={0.03} />
-          <InstancedKitMesh parts={parts} kind="trim" style={p.style} color={p.trim} roughness={0.84} metalness={0.02} />
-          <InstancedKitMesh parts={parts} kind="roof" style={p.style} color={p.roof} emissive={p.roofEm} roughness={0.82} metalness={0.04} />
-          <InstancedKitMesh parts={parts} kind="window" style={p.style} color={p.window} emissive={p.windowEm} roughness={0.2} metalness={0.06} />
-          <InstancedKitMesh parts={parts} kind="door" style={p.style} color={p.door} emissive={p.doorEm} roughness={0.75} metalness={0.02} />
-          <InstancedKitMesh parts={parts} kind="accent" style={p.style} color={p.accent} emissive={p.wallEm} roughness={0.86} metalness={0.03} />
-          <InstancedKitMesh parts={parts} kind="awning" style={p.style} color={p.awning} emissive={p.roofEm} roughness={0.64} metalness={0.02} />
+      {CULTURE_PALETTES.map((p) => (
+        <React.Fragment key={`culture-${p.culture}`}>
+          <InstancedKitMesh parts={parts} kind="foundation" culture={p.culture} color={p.foundation} roughness={0.96} metalness={0} />
+          <InstancedKitMesh parts={parts} kind="wall" culture={p.culture} color={p.wall} emissive={p.wallEm} roughness={0.9} metalness={0.03} />
+          <InstancedKitMesh parts={parts} kind="trim" culture={p.culture} color={p.trim} roughness={0.84} metalness={0.02} />
+          <InstancedKitMesh parts={parts} kind="roof" culture={p.culture} color={p.roof} emissive={p.roofEm} roughness={0.82} metalness={0.04} />
+          <InstancedKitMesh parts={parts} kind="window" culture={p.culture} color={p.window} emissive={p.windowEm} roughness={0.2} metalness={0.06} />
+          <InstancedKitMesh parts={parts} kind="door" culture={p.culture} color={p.door} emissive={p.doorEm} roughness={0.75} metalness={0.02} />
+          <InstancedKitMesh parts={parts} kind="accent" culture={p.culture} color={p.accent} emissive={p.wallEm} roughness={0.86} metalness={0.03} />
+          <InstancedKitMesh parts={parts} kind="awning" culture={p.culture} color={p.awning} emissive={p.roofEm} roughness={0.64} metalness={0.02} />
+          <InstancedKitMesh parts={parts} kind="porch" culture={p.culture} color={p.porch} roughness={0.86} metalness={0.02} />
+          <InstancedKitMesh parts={parts} kind="balcony" culture={p.culture} color={p.balcony} roughness={0.8} metalness={0.03} />
         </React.Fragment>
       ))}
     </>
@@ -648,16 +1074,35 @@ function specFor(building: BuildingAsset, layout: BuildingLayout): BuildingSpec 
     depth: layout.depth,
     floors: layout.floors,
     style: layout.style,
+    buildingType: layout.buildingType,
+    garage: layout.garage ? { side: layout.garage.side, centerZ: layout.garage.centerZ, halfW: layout.garage.halfW } : null,
     doorW: layout.doorW,
     doorH: layout.doorH,
   };
 }
 
-/** Same door palette the exterior shell paints its front door with, kept in sync. */
-const STYLE_DOOR: Record<0 | 1 | 2, { color: string; emissive: string; frame: string }> = {
-  0: { color: '#8e7e5f', emissive: '#3f2f17', frame: '#3f4438' },
-  1: { color: '#776f83', emissive: '#312843', frame: '#34394a' },
-  2: { color: '#5f4a34', emissive: '#352211', frame: '#463a2c' },
+/** Same door/wall palette the exterior shell paints itself with, kept in sync. */
+const CULTURE_DOOR: Record<CultureStyle, { color: string; emissive: string; frame: string }> = {
+  mediterranean: { color: '#5b7a5e', emissive: '#1f2f1f', frame: '#8a7250' },
+  nordic: { color: '#7c3f34', emissive: '#2c1310', frame: '#4c4640' },
+  japanese: { color: '#8a2f24', emissive: '#380f0a', frame: '#2f2822' },
+  colonial: { color: '#7a2f2c', emissive: '#2f1110', frame: '#e7e2d2' },
+  tudor: { color: '#2b2118', emissive: '#100b07', frame: '#2b2118' },
+  adobe: { color: '#4f7a6e', emissive: '#193029', frame: '#a97b52' },
+  modern: { color: '#26282a', emissive: '#0f1011', frame: '#4d4f52' },
+};
+
+const CULTURE_INTERIOR_PALETTE: Record<
+  CultureStyle,
+  { floor: string; wall: string; ceiling: string; trim: string; glow: string }
+> = {
+  mediterranean: { floor: '#b58a5e', wall: '#ede2c9', ceiling: '#d9c9a3', trim: '#5b7a5e', glow: '#ffd9a0' },
+  nordic: { floor: '#877a68', wall: '#e2dbc9', ceiling: '#c9bfa9', trim: '#7c3f34', glow: '#bfe0ff' },
+  japanese: { floor: '#6b5a48', wall: '#ece5d4', ceiling: '#d8cfba', trim: '#8a2f24', glow: '#ffe3ad' },
+  colonial: { floor: '#8f8672', wall: '#f1eee4', ceiling: '#e7e2d2', trim: '#7a2f2c', glow: '#dfe9ea' },
+  tudor: { floor: '#5a4a3a', wall: '#e6ddc8', ceiling: '#d3c6a8', trim: '#2b2118', glow: '#ffdca0' },
+  adobe: { floor: '#a97b52', wall: '#e0bb8c', ceiling: '#cf9f6c', trim: '#4f7a6e', glow: '#ffcf9e' },
+  modern: { floor: '#9a9ea1', wall: '#e7e9eb', ceiling: '#d3d6d9', trim: '#26282a', glow: '#bfe8ff' },
 };
 
 interface BoxTransform {
@@ -723,6 +1168,15 @@ const FURNITURE_COLOR: Record<FurnitureKind, string> = {
   table: '#6b5338',
   lamp: '#e4cf8f',
   bed: '#8fa0b8',
+  sofa: '#7a6a8f',
+  tv: '#20242c',
+  counter: '#8a8a86',
+  stove: '#4a4c52',
+  sink: '#c7cdd4',
+  toilet: '#dfe4e8',
+  wardrobe: '#5f4d38',
+  diningTable: '#6b4f38',
+  car: '#a33f3f',
 };
 
 /** Per-role floor finish so rooms read as different spaces, not one big box. */
@@ -732,6 +1186,13 @@ const ROOM_FLOOR_TINT: Record<RoomRole, number> = {
   storage: 0.74,
   lounge: 1.14,
   stair: 0.86,
+  living: 1.12,
+  kitchen: 0.9,
+  bedroom: 1.02,
+  bathroom: 1.2,
+  dining: 1.06,
+  hall: 0.92,
+  garage: 0.7,
 };
 
 function shade(hex: string, mul: number): string {
@@ -750,24 +1211,16 @@ function InteriorScene({
   floor,
   floorplan,
   furniture,
-  style,
 }: {
   building: BuildingAsset;
   layout: BuildingLayout;
   floor: number;
   floorplan: Floorplan;
   furniture: FurniturePiece[];
-  style: 0 | 1 | 2;
 }) {
   const origin = interiorOrigin(layout, floor);
-  const doorInfo = STYLE_DOOR[style];
-
-  const palette =
-    style === 0
-      ? { floor: '#8a8474', wall: '#cfc9b8', ceiling: '#b7b2a2', trim: '#5f685a', glow: '#bfe6c9' }
-      : style === 1
-        ? { floor: '#767c8c', wall: '#c3c7d4', ceiling: '#9fa4b4', trim: '#5e6172', glow: '#bcd0ff' }
-        : { floor: '#8f7a5c', wall: '#d8c7a8', ceiling: '#bda87e', trim: '#76634e', glow: '#ffe3ad' };
+  const doorInfo = CULTURE_DOOR[layout.cultureStyle];
+  const palette = CULTURE_INTERIOR_PALETTE[layout.cultureStyle];
 
   // Stairwell shafts punch through the floor slab (descending) and/or the
   // ceiling slab (ascending) instead of the stairs visually clipping through
@@ -997,6 +1450,118 @@ function groundAt(
     if (v > h) h = v;
   }
   return h;
+}
+
+/**
+ * Carves a flat pad (plus a walk-up apron out the front, toward the door)
+ * into the terrain under every building, blending back to natural terrain
+ * at the edges.
+ *
+ * Building floor height only ever samples a handful of points right at the
+ * footprint (see buildingLayout's floorY). On genuinely rugged terrain —
+ * the side of a mountain, say — the ground a couple of metres away from
+ * those sample points can differ by many metres, so the building (and its
+ * exactly-level floor) ends up perched above a cliff with no walkable path
+ * to the door at all. Flattening a small lot under and in front of every
+ * building guarantees a level pad and a walkable approach regardless of
+ * what the surrounding terrain looks like — the same trick real building
+ * sites use (grading), just automatic.
+ */
+/**
+ * Returns a new `built` list with every building's pad carved flat.
+ *
+ * Clones (rather than mutates in place) whichever patch a building actually
+ * touches, and writes the clone back into `cache` — so the patch gets a
+ * fresh terrain object reference the first time it's flattened. PatchMesh
+ * memoizes its geometry on that reference; mutating the old object in place
+ * would update collision/ground-height instantly (heightAt reads the array
+ * directly) but leave the *visible* mesh stale whenever a building is added
+ * after its patch already rendered, which is the common case (terrain
+ * usually exists before someone draws a building on top of it).
+ */
+function flattenBuildingPads(
+  built: { patch: Patch; terrain: TerrainData }[],
+  buildings: BuildingAsset[],
+  cache: Map<string, TerrainData>,
+  done: Set<string>,
+): { patch: Patch; terrain: TerrainData }[] {
+  const out = built.map((e) => ({ ...e }));
+  const clonedThisPass = new Set<string>();
+
+  for (const building of buildings) {
+    const { cx, cz, width, depth } = footprintFor(building);
+    const halfW = width / 2;
+    const halfD = depth / 2;
+
+    // Same rule buildingLayout uses for floorY, sampled from the terrain as
+    // it stood before this building's own flattening — so the pad matches
+    // the floor height the building will actually render at.
+    const frontMid = groundAt(built, cx, cz + halfD);
+    const nw = groundAt(built, cx - halfW, cz + halfD);
+    const ne = groundAt(built, cx + halfW, cz + halfD);
+    const floorY = Math.max(nw, ne, frontMid);
+
+    const padHalfW = halfW + 1.2;
+    const padHalfD = halfD + 1.2;
+    const apronDepth = 8; // flat walkway straight out from the door
+    const blend = 4; // radius over which the pad fades back to natural terrain
+
+    for (const entry of out) {
+      const key = `${building.id}:${entry.patch.id}`;
+      if (done.has(key)) continue;
+
+      const half = entry.terrain.scale / 2;
+      const zoneHalfD = padHalfD + apronDepth + blend;
+      const zoneHalfW = padHalfW + blend;
+      // Quick reject: does this building's flatten zone even reach this patch?
+      if (Math.abs(cx - entry.patch.x) - zoneHalfW > half || Math.abs(cz - entry.patch.z) - zoneHalfD > half) {
+        continue;
+      }
+      done.add(key);
+
+      if (!clonedThisPass.has(entry.patch.id)) {
+        const cloned: TerrainData = { ...entry.terrain, heights: Float32Array.from(entry.terrain.heights) };
+        entry.terrain = cloned;
+        cache.set(entry.patch.id, cloned);
+        clonedThisPass.add(entry.patch.id);
+      }
+
+      const { patch, terrain } = entry;
+      const size = terrain.size;
+      const scale = terrain.scale;
+      for (let iy = 0; iy < size; iy++) {
+        const lz = -half + (iy / (size - 1)) * scale;
+        const wz = patch.z + lz;
+        const dz = wz - cz;
+        for (let ix = 0; ix < size; ix++) {
+          const lx = -half + (ix / (size - 1)) * scale;
+          const wx = patch.x + lx;
+          const dx = wx - cx;
+
+          const inPad = Math.abs(dx) <= padHalfW && Math.abs(dz) <= padHalfD;
+          const inApron = Math.abs(dx) <= padHalfW && dz > padHalfD && dz <= padHalfD + apronDepth;
+          const idx = iy * size + ix;
+          if (inPad || inApron) {
+            terrain.heights[idx] = floorY;
+            continue;
+          }
+
+          const beyondX = Math.max(0, Math.abs(dx) - padHalfW);
+          const beyondZ =
+            dz > padHalfD + apronDepth
+              ? dz - (padHalfD + apronDepth)
+              : Math.max(0, Math.abs(dz) - padHalfD);
+          const dist = Math.hypot(beyondX, beyondZ);
+          if (dist < blend) {
+            const t = dist / blend;
+            terrain.heights[idx] = floorY + (terrain.heights[idx] - floorY) * t;
+          }
+        }
+      }
+    }
+  }
+
+  return out;
 }
 
 interface Footprint {
@@ -1687,18 +2252,21 @@ export default function World() {
   // Synthesis is the expensive step, so it happens once per patch and is
   // cached by id — not on every render or frame.
   const cache = useRef<Map<string, TerrainData>>(new Map());
-  const built = useMemo(
-    () =>
-      patches.map((patch) => {
-        let terrain = cache.current.get(patch.id);
-        if (!terrain) {
-          terrain = terrainFor(patch);
-          cache.current.set(patch.id, terrain);
-        }
-        return { patch, terrain };
-      }),
-    [patches],
-  );
+  // Tracks which (building, patch) pads have already been carved flat, so
+  // re-renders don't re-scan every terrain grid for every building already
+  // handled — flattening a patch's heights in place is a one-time fix-up.
+  const flattenedPads = useRef<Set<string>>(new Set());
+  const built = useMemo(() => {
+    const list = patches.map((patch) => {
+      let terrain = cache.current.get(patch.id);
+      if (!terrain) {
+        terrain = terrainFor(patch);
+        cache.current.set(patch.id, terrain);
+      }
+      return { patch, terrain };
+    });
+    return flattenBuildingPads(list, buildings, cache.current, flattenedPads.current);
+  }, [patches, buildings]);
   const buildingLayouts = useMemo(
     () => buildings.map((building) => ({ building, layout: buildingLayout(building, built) })),
     [buildings, built],
@@ -1776,6 +2344,8 @@ export default function World() {
         meanInk: Number(props.meanInk) || 0,
         normWidth: Number(props.normWidth) || inferredNormW,
         normHeight: Number(props.normHeight) || inferredNormH,
+        roofFrac: Number(props.roofFrac) || 0,
+        floorProfile: sanitizeFloorProfile(props.floorProfile),
       };
     };
     const toAnimal = (r: Record<string, unknown>): AnimalData | null => {
@@ -1927,6 +2497,8 @@ export default function World() {
       meanInk: draft.building.meanInk,
       normWidth: draft.building.normWidth,
       normHeight: draft.building.normHeight,
+      roofFrac: draft.building.roofFrac,
+      floorProfile: draft.building.floorProfile,
     };
     setBuildings((prev) => [...prev, optimistic]);
     setDrawAt(null);
@@ -1949,6 +2521,8 @@ export default function World() {
           meanInk: draft.building.meanInk,
           normWidth: draft.building.normWidth,
           normHeight: draft.building.normHeight,
+          roofFrac: draft.building.roofFrac,
+          floorProfile: draft.building.floorProfile,
         },
       })
       .select()
@@ -1969,6 +2543,8 @@ export default function World() {
             meanInk: Number(props.meanInk) || optimistic.meanInk,
             normWidth: Number(props.normWidth) || optimistic.normWidth,
             normHeight: Number(props.normHeight) || optimistic.normHeight,
+            roofFrac: Number(props.roofFrac) || optimistic.roofFrac,
+            floorProfile: props.floorProfile ? sanitizeFloorProfile(props.floorProfile) : optimistic.floorProfile,
           };
           return without.some((b) => b.id === saved.id) ? without : [...without, saved];
         });
@@ -2052,7 +2628,6 @@ export default function World() {
             floor={interior!.floor}
             floorplan={activeInterior.floorplan}
             furniture={activeInterior.furniture}
-            style={activeInterior.layout.style}
           />
         )}
 
