@@ -52,7 +52,9 @@ import {
   normalizeCondition,
   type WeatherAsset,
 } from './weather';
-import { WeatherSystem } from './WeatherFX';
+import { Weather, type Atmosphere } from './world/weather';
+import { Minimap, type MinimapSelf } from './world/Minimap';
+import type { Contribution, WeatherPayload } from './world/contract';
 import {
   createVegetationPatches,
   VegetationLayer,
@@ -71,6 +73,10 @@ const SKETCH_GRID = 64;
 const PATCH_SCALE = 300;
 const PATCH_MAX_H = 60;
 const EYE = 1.8;
+
+/** Stable empty list, so going indoors doesn't hand Weather a new array every
+ *  render and defeat its memoisation. */
+const EMPTY_ZONES: Contribution<WeatherPayload>[] = [];
 const PROXIMITY_AUDIO_DISTANCE = 50; // Max distance in meters to hear animal
 /** How far ahead of the player a new sketch lands — enough that even the
  *  largest generated building (~12.6m wide) can't spawn on top of them. */
@@ -2037,7 +2043,9 @@ function Walker({
   onOpenAnimalDraw,
   onOpenVegetation,
   isModalOpen,
+  mapSelf,
 }: {
+  mapSelf: React.RefObject<MinimapSelf>;
   built: { patch: Patch; terrain: TerrainData }[];
   footprints: Footprint[];
   buildingLayouts: { building: BuildingAsset; layout: BuildingLayout }[];
@@ -2132,6 +2140,12 @@ function Walker({
   }, [camera, onOpenDraw, onOpenAnimalDraw, onOpenVegetation, isModalOpen]);
 
   useFrame((_, delta) => {
+    // Before the modal guard: the map should keep showing where you are while
+    // a draw panel is open, and mutating in place costs nothing.
+    mapSelf.current.x = camera.position.x;
+    mapSelf.current.z = camera.position.z;
+    mapSelf.current.a = camera.rotation.y;
+
     if (isModalOpen) return;
     const m = move.current;
     const speed = (m.sprint ? 40 : 16) * delta;
@@ -2338,6 +2352,27 @@ export default function World() {
   const [buildings, setBuildings] = useState<BuildingAsset[]>([]);
   const [animals, setAnimals] = useState<AnimalData[]>([]);
   const [weathers, setWeathers] = useState<WeatherAsset[]>([]);
+  // The same weather rows, parsed for the new atmosphere system.
+  //
+  // Kept separate from `weathers` rather than derived from it because
+  // normalizeCondition collapses the vocabulary on the way in — 'rain' becomes
+  // 'overcast' and 'snow' becomes 'light', which is lossless for the five
+  // legacy conditions and lossy for everything else. Parsing the row a second
+  // time is cheaper than teaching the old contract about the new one.
+  const [zones, setZones] = useState<Contribution<WeatherPayload>[]>([]);
+  /** Live atmosphere, for the minimap and anything else that wants to read it. */
+  const atmosphereRef = useRef<Atmosphere | null>(null);
+  /** Camera position for the minimap, mutated in place so it never re-renders. */
+  const mapSelf = useRef<MinimapSelf>({ x: 0, z: 40, a: 0 });
+
+  // Particle budget. A judge's phone gets a much smaller buffer — the sky and
+  // fog carry most of the atmosphere anyway, and they cost the same either way.
+  const quality = useMemo(() => {
+    if (typeof navigator === 'undefined') return 1;
+    const coarse =
+      typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches;
+    return coarse || navigator.hardwareConcurrency <= 4 ? 0.35 : 1;
+  }, []);
   const [travellers, setTravellers] = useState<Traveller[]>([]);
   const [drawAt, setDrawAt] = useState<{ x: number; z: number } | null>(null);
   const [animalDrawAt, setAnimalDrawAt] = useState<{ x: number; z: number } | null>(null);
@@ -2469,6 +2504,29 @@ export default function World() {
         speed: typeof props.speed === 'number' ? props.speed : undefined, // Add this line
       };
     };
+    // Same row, read for the new atmosphere system. This one keeps the
+    // condition exactly as it was written, so 'rain' stays rain.
+    const toZone = (r: Record<string, unknown>): Contribution<WeatherPayload> | null => {
+      if (r.type !== 'weather') return null;
+      const props = (r.properties ?? {}) as Record<string, unknown>;
+      const condition = typeof props.condition === 'string' ? props.condition : null;
+      if (!condition) return null;
+      return {
+        id: String(r.id),
+        kind: 'weather',
+        x: Number(r.x) || 0,
+        z: Number(r.z) || 0,
+        rotation: 0,
+        author: String(r.author ?? ''),
+        created_at: String(r.created_at ?? ''),
+        payload: {
+          condition,
+          intensity: typeof props.intensity === 'number' ? props.intensity : 0.85,
+          radius: typeof props.radius === 'number' ? props.radius : 260,
+        },
+      };
+    };
+
     const toWeather = (r: Record<string, unknown>): WeatherAsset | null => {
       if (r.type !== 'weather') return null;
       const props = (r.properties ?? {}) as Record<string, unknown>;
@@ -2520,6 +2578,14 @@ export default function World() {
           }
           return [...byId.values()];
         });
+        setZones((prev) => {
+          const byId = new Map(prev.map((z) => [z.id, z]));
+          for (const row of data) {
+            const z = toZone(row as Record<string, unknown>);
+            if (z) byId.set(z.id, z);
+          }
+          return [...byId.values()];
+        });
       });
 
     const channel = supabase
@@ -2544,6 +2610,10 @@ export default function World() {
           const w = toWeather(row);
           if (w) {
             setWeathers((prev) => (prev.some((q) => q.id === w.id) ? prev : [...prev, w]));
+          }
+          const z = toZone(row);
+          if (z) {
+            setZones((prev) => (prev.some((q) => q.id === z.id) ? prev : [...prev, z]));
           }
         },
       )
@@ -2751,17 +2821,37 @@ export default function World() {
 
   const isModalOpen = drawAt !== null || vegetationAt !== null || (animalDrawAt !== null && !isRecordingPath);
 
+  // Flattened for the minimap, which wants plain numbers rather than the
+  // contribution envelope.
+  const mapZones = useMemo(
+    () =>
+      zones.map((z) => ({
+        id: z.id,
+        x: z.x,
+        z: z.z,
+        radius: z.payload.radius,
+        condition: z.payload.condition,
+      })),
+    [zones],
+  );
+
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
       <Canvas
         shadows={{ type: THREE.PCFShadowMap }}
         dpr={[1, 2]}
         camera={{ position: [0, EYE, 40], fov: 72, near: 0.5, far: 3000 }}
-        onCreated={({ scene }) => {
-          scene.fog = new THREE.FogExp2('#c8daf0', 0.0012);
-        }}
       >
-        <WeatherSystem assets={weathers} indoors={interior !== null} />
+        {/* Weather owns scene.fog — it drives density and colour from the
+            blended atmosphere, so a static FogExp2 set here would be
+            overwritten on the first frame anyway. Indoors the zone list is
+            emptied rather than the system unmounted, so stepping outside eases
+            back into the weather instead of snapping. */}
+        <Weather
+          zones={interior !== null ? EMPTY_ZONES : zones}
+          quality={quality}
+          expose={atmosphereRef}
+        />
 
         <Plain />
         {built.map(({ patch, terrain }) => (
@@ -2819,8 +2909,23 @@ export default function World() {
           }}
           onOpenVegetation={(x, z) => setVegetationAt({ x, z })}
           isModalOpen={isModalOpen}
+          mapSelf={mapSelf}
         />
       </Canvas>
+
+      {/* Hidden indoors — the map draws the outdoor world, and inside a
+          building the arrow would wander a landscape you cannot see. */}
+      {interior === null && (
+        <div className="absolute right-6 top-6">
+          <Minimap
+            half={1000}
+            patches={built.map(({ patch }) => ({ id: patch.id, x: patch.x, z: patch.z }))}
+            zones={mapZones}
+            travellers={travellers}
+            self={mapSelf}
+          />
+        </div>
+      )}
 
       <div className="pointer-events-none absolute left-6 top-6 rounded-lg bg-black/50 p-4 backdrop-blur">
         <div className="flex items-center justify-between gap-4">
