@@ -2739,7 +2739,7 @@ export default function World() {
           <h1 className="text-lg font-semibold text-white">Infinite Terra</h1>
           <Link
             href="/dashboard"
-            className="pointer-events-auto text-xs text-white/50 underline decoration-white/20 underline-offset-2 hover:text-white/80"
+            className="pointer-events-auto text-base text-white/60 underline decoration-white/25 underline-offset-2 hover:text-white/90"
           >
             observatory ↗
           </Link>
@@ -2751,7 +2751,7 @@ export default function World() {
         </p>
       </div>
 
-      <div className="pointer-events-none absolute bottom-6 left-6 space-y-1 text-xs text-white/55">
+      <div className="pointer-events-none absolute bottom-6 left-6 space-y-1.5 text-base text-white/60">
         <p>
           <span className="text-white/85">Click</span> to look ·{' '}
           <span className="text-white/85">WASD</span> to walk ·{' '}
