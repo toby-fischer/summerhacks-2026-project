@@ -147,10 +147,9 @@ export const BIOMES: {
     plants: [
       { type: 'grass', weight: 50 },
       { type: 'flower', weight: 10 },
-      { type: 'sunflower', weight: 10 },
+      { type: 'sunflower', weight: 20 },
       { type: 'tulip', weight: 10 },
       { type: 'bush', weight: 10 },
-      { type: 'sunflower', weight: 10 },
     ],
   },
 ];
@@ -3155,8 +3154,8 @@ export function VegetationPanel({
                 <p className="text-sm text-white/70">{selectedBiome.name} biome</p>
                 <div className="mt-3 space-y-2 text-sm text-white/60">
                   <p>Plant composition:</p>
-                  {selectedBiome.plants.map((entry) => (
-                    <p key={entry.type}>
+                  {selectedBiome.plants.map((entry, i) => (
+                    <p key={`${entry.type}-${i}`}>
                       {entry.type.charAt(0).toUpperCase() + entry.type.slice(1)} — {entry.weight}%
                     </p>
                   ))}
